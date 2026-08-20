@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.log
+
+data/
+MFASS/*.parquet
+MFASS/manifest.json
+release/
