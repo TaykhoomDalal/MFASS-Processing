@@ -1,3 +1,5 @@
+"""Shared processing helpers."""
+
 from __future__ import annotations
 
 import hashlib
@@ -58,7 +60,11 @@ def align_sequences(source: str, target: str) -> dict[str, Any]:
 
 
 def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
+    return file_digest(path, "sha256")
+
+
+def file_digest(path: Path, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)

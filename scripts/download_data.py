@@ -3,181 +3,221 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import json
+import os
 import shutil
+import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
-
-import sys
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import sha256, write_json
+from scripts.common import file_digest
 
 
-MFASS_COMMIT = "3b1b2bdaea828283508ba22cdd8d0c431ea70dea"
-SPLICECONSENSUS_COMMIT = "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
-MFASS_RAW = (
-    "https://raw.githubusercontent.com/KosuriLab/MFASS/"
-    f"{MFASS_COMMIT}/processed_data/snv/snv_data_clean.txt"
-)
-SPLICE_RAW = (
-    "https://raw.githubusercontent.com/brhanufen/spliceconsensus/"
-    f"{SPLICECONSENSUS_COMMIT}"
-)
-FASTA_URL = (
-    "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/"
-    "GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/"
-    "GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz"
-)
-FASTA_SHA256 = (
-    "9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7"
-)
-
-ASSETS = {
-    "source/snv_data_clean.txt": {
-        "url": MFASS_RAW,
-        "sha256": (
-            "a637ca0e307e66ff48811ec7efa22b9ce453bc7883b04f0cacb867f7283132d8"
-        ),
-    },
-    "published/mfass_labels.csv": {
-        "url": f"{SPLICE_RAW}/data/mfass_labels.csv",
-        "sha256": (
-            "ce6e3b584ae8fe07d52f1f2611689c6d68ed531c4d2b5b073af94851c146cd7c"
-        ),
-    },
-    "published/scores_pangolin.csv": {
-        "url": f"{SPLICE_RAW}/results/scores_pangolin.csv",
-        "sha256": (
-            "c76ce4fbe4c5c979c4e1534068e72354223f0d5c62d3f7e91e1f4fccd16341fa"
-        ),
-    },
-    "published/scores_spliceai.csv": {
-        "url": f"{SPLICE_RAW}/results/scores_spliceai.csv",
-        "sha256": (
-            "2e923e60c7611486ebcd95797c3e436807535d9463be4685dcc8e44b13239776"
-        ),
-    },
-    "published/scores_splicetx.csv": {
-        "url": f"{SPLICE_RAW}/results/scores_splicetx.csv",
-        "sha256": (
-            "d482551808825d2de59952d006a8524f97efec451db01201544ef3a08e6d3a8f"
-        ),
-    },
-    "published/scores_mmsplice.csv": {
-        "url": f"{SPLICE_RAW}/results/scores_mmsplice.csv",
-        "sha256": (
-            "b05b07be7db19a39a040963885f5053ad164b851cebad377113747f0a227dec0"
-        ),
-    },
-}
+ROOT = Path(__file__).resolve().parents[1]
+MANIFEST = ROOT / "manifest.json"
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_TIMEOUT_SECONDS = 120
+USER_AGENT = "MFASS-Processing/1.0"
 
 
-def verify(path: Path, expected: str) -> None:
-    actual = sha256(path)
-    if actual != expected:
-        raise RuntimeError(f"{path}: expected sha256 {expected}, got {actual}")
+def load_manifest(path: Path | None = None) -> dict[str, Any]:
+    manifest_path = MANIFEST if path is None else path
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("manifest_version") != 1:
+        raise RuntimeError("unsupported manifest version")
+    if not isinstance(payload.get("sources"), dict):
+        raise RuntimeError("manifest has no source records")
+    return payload
 
 
-def download(url: str, path: Path, expected: str) -> None:
-    if path.is_file():
-        verify(path, expected)
-        return
-    if path.exists():
-        raise RuntimeError(f"refusing to overwrite unexpected path: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "MFASS-Processing/1.0"}
+def source_records() -> dict[str, dict[str, Any]]:
+    return load_manifest()["sources"]
+
+
+def materialized_sources() -> dict[str, dict[str, Any]]:
+    return {
+        record["local_path"]: record["materialized"]
+        for record in source_records().values()
+    }
+
+
+def verify(path: Path, expected: dict[str, Any]) -> None:
+    expected_bytes = expected.get("bytes")
+    if expected_bytes is not None and path.stat().st_size != expected_bytes:
+        raise RuntimeError(
+            f"{path}: expected {expected_bytes} bytes, "
+            f"got {path.stat().st_size}"
+        )
+    for algorithm in ("sha256", "md5"):
+        wanted = expected.get(algorithm)
+        if wanted is None:
+            continue
+        observed = file_digest(path, algorithm)
+        if observed != wanted:
+            raise RuntimeError(
+                f"{path}: expected {algorithm} {wanted}, got {observed}"
+            )
+
+
+def fetch(url: str, temporary: Path, expected: dict[str, Any]) -> None:
+    errors = []
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        temporary.unlink(missing_ok=True)
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": USER_AGENT}
+            )
+            with urllib.request.urlopen(
+                request, timeout=DOWNLOAD_TIMEOUT_SECONDS
+            ) as source:
+                content_length = source.headers.get("Content-Length")
+                if (
+                    content_length is not None
+                    and expected.get("bytes") is not None
+                    and int(content_length) != expected["bytes"]
+                ):
+                    raise RuntimeError(
+                        f"{url}: expected Content-Length "
+                        f"{expected['bytes']}, got {content_length}"
+                    )
+                with temporary.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+            verify(temporary, expected)
+            return
+        except (
+            OSError,
+            RuntimeError,
+            TimeoutError,
+            urllib.error.URLError,
+        ) as error:
+            temporary.unlink(missing_ok=True)
+            errors.append(f"attempt {attempt}: {error}")
+            if attempt < DOWNLOAD_ATTEMPTS:
+                delay = 2 ** (attempt - 1)
+                print(
+                    f"download failed; retrying in {delay}s: {url}",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+    raise RuntimeError(
+        f"failed to acquire {url} after {DOWNLOAD_ATTEMPTS} attempts: "
+        + "; ".join(errors)
     )
-    with urllib.request.urlopen(request, timeout=180) as source:
-        with temporary.open("wb") as target:
-            shutil.copyfileobj(source, target)
-    verify(temporary, expected)
-    temporary.replace(path)
 
 
-def link(source: Path, target: Path, expected: str) -> None:
-    source = source.resolve()
-    verify(source, expected)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink() and target.resolve() == source:
+def download(record: dict[str, Any], target: Path) -> None:
+    if target.is_file():
+        verify(target, record["materialized"])
         return
     if target.exists() or target.is_symlink():
         raise RuntimeError(f"refusing to overwrite unexpected path: {target}")
-    target.symlink_to(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.download")
+    fetch(record["url"], temporary, record["download"])
+    verify(temporary, record["materialized"])
+    os.replace(temporary, target)
 
 
-def prepare_fasta(data_root: Path, reuse: Path | None) -> Path:
-    fasta = (
-        data_root / "reference"
-        / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
-    )
+def link(
+    source: Path, target: Path, expected: dict[str, Any]
+) -> None:
+    source = source.resolve(strict=True)
+    verify(source, expected)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() and target.resolve() == source:
+        verify(target, expected)
+        return
+    if target.is_file():
+        verify(target, expected)
+        return
+    if target.exists() or target.is_symlink():
+        raise RuntimeError(f"refusing to overwrite unexpected path: {target}")
+    temporary = target.with_name(f".{target.name}.link")
+    temporary.unlink(missing_ok=True)
+    temporary.symlink_to(source)
+    os.replace(temporary, target)
+
+
+def prepare_compressed(
+    record: dict[str, Any], target: Path, reuse: Path | None
+) -> None:
     if reuse is not None:
-        link(reuse, fasta, FASTA_SHA256)
-        return fasta
-    if fasta.is_file():
-        verify(fasta, FASTA_SHA256)
-        return fasta
-    fasta.parent.mkdir(parents=True, exist_ok=True)
-    compressed = fasta.with_suffix(".fa.gz")
-    request = urllib.request.Request(
-        FASTA_URL, headers={"User-Agent": "MFASS-Processing/1.0"}
-    )
-    with urllib.request.urlopen(request, timeout=180) as source:
-        with compressed.open("wb") as target:
-            shutil.copyfileobj(source, target)
-    temporary = fasta.with_suffix(".fa.tmp")
-    with gzip.open(compressed, "rb") as source, temporary.open("wb") as target:
-        shutil.copyfileobj(source, target)
-    verify(temporary, FASTA_SHA256)
-    temporary.replace(fasta)
-    compressed.unlink()
-    return fasta
+        link(reuse, target, record["materialized"])
+        return
+    if target.is_file():
+        verify(target, record["materialized"])
+        return
+    if target.exists() or target.is_symlink():
+        raise RuntimeError(f"refusing to overwrite unexpected path: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    compressed = target.with_name(f".{target.name}.download.gz")
+    materialized = target.with_name(f".{target.name}.materializing")
+    try:
+        fetch(record["url"], compressed, record["download"])
+        with gzip.open(compressed, "rb") as source:
+            with materialized.open("wb") as destination:
+                shutil.copyfileobj(source, destination)
+        verify(materialized, record["materialized"])
+        os.replace(materialized, target)
+    finally:
+        compressed.unlink(missing_ok=True)
+        materialized.unlink(missing_ok=True)
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=root / "data")
+    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     parser.add_argument("--reuse-source", type=Path)
     parser.add_argument("--reuse-benchmark-root", type=Path)
     parser.add_argument("--reuse-fasta", type=Path)
     args = parser.parse_args()
 
-    for relative, record in ASSETS.items():
-        target = args.data_root / relative
-        if relative == "source/snv_data_clean.txt" and args.reuse_source:
-            link(args.reuse_source, target, record["sha256"])
-        elif relative.startswith("published/") and args.reuse_benchmark_root:
-            name = Path(relative).name
-            source = (
-                args.reuse_benchmark_root / "data/mfass_labels.csv"
-                if name == "mfass_labels.csv"
-                else args.reuse_benchmark_root / "results" / name
-            )
-            link(source, target, record["sha256"])
-        else:
-            download(record["url"], target, record["sha256"])
-
-    fasta = prepare_fasta(args.data_root, args.reuse_fasta)
-    manifest = {
-        "mfass_commit": MFASS_COMMIT,
-        "spliceconsensus_commit": SPLICECONSENSUS_COMMIT,
-        "assets": {
-            relative: {
-                **record,
-                "local_path": relative,
-            }
-            for relative, record in ASSETS.items()
-        },
-        "reference": {
-            "url": FASTA_URL,
-            "sha256": FASTA_SHA256,
-            "local_path": str(fasta.relative_to(args.data_root)),
-        },
+    records = source_records()
+    reuse_paths = {
+        "mfass_measurements": args.reuse_source,
+        "mfass_labels": (
+            args.reuse_benchmark_root / "data/mfass_labels.csv"
+            if args.reuse_benchmark_root
+            else None
+        ),
+        "pangolin_scores": (
+            args.reuse_benchmark_root / "results/scores_pangolin.csv"
+            if args.reuse_benchmark_root
+            else None
+        ),
+        "spliceai_scores": (
+            args.reuse_benchmark_root / "results/scores_spliceai.csv"
+            if args.reuse_benchmark_root
+            else None
+        ),
+        "splicetransformer_scores": (
+            args.reuse_benchmark_root / "results/scores_splicetx.csv"
+            if args.reuse_benchmark_root
+            else None
+        ),
+        "mmsplice_scores": (
+            args.reuse_benchmark_root / "results/scores_mmsplice.csv"
+            if args.reuse_benchmark_root
+            else None
+        ),
     }
-    write_json(args.data_root / "input_manifest.json", manifest)
-    print(f"prepared pinned inputs under {args.data_root}")
+    for name, record in records.items():
+        target = args.data_root / record["local_path"]
+        if record.get("compression"):
+            prepare_compressed(record, target, args.reuse_fasta)
+        elif reuse_paths.get(name) is not None:
+            link(reuse_paths[name], target, record["materialized"])
+        else:
+            download(record, target)
+
+    print(
+        f"prepared sources under {args.data_root} from "
+        f"{MANIFEST.name}"
+    )
 
 
 if __name__ == "__main__":

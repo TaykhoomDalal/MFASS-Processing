@@ -1,0 +1,958 @@
+{
+  "contracts": {
+    "mfass": {
+      "coordinates": {
+        "alleles": "forward-genome",
+        "assembly": "GRCh38 no-alt GCA_000001405.15",
+        "chromosome_names": "UCSC chr-prefixed",
+        "exon_end": "exclusive within assay sequence",
+        "exon_start": "0-based within assay sequence",
+        "negative_strand_assay_bases": "complement of genome alleles",
+        "position": "1-based",
+        "strand_column": "strand",
+        "variant_offset": "0-based within assay sequence"
+      },
+      "evaluation": {
+        "label_column": "source_label",
+        "loss_column": "v2_dpsi",
+        "loss_transform": "negative",
+        "mask": "source_label.notna() & score.notna()",
+        "membership": {
+          "mmsplice": {
+            "ordered_pair_ids_sha256": "cacc2987de08f60013e3eee6fd8e91ba5a71febaa8e9ed24c7d8ee1c48bfaf81",
+            "positives": 1050,
+            "rows": 27733
+          },
+          "pangolin": {
+            "ordered_pair_ids_sha256": "cacc2987de08f60013e3eee6fd8e91ba5a71febaa8e9ed24c7d8ee1c48bfaf81",
+            "positives": 1050,
+            "rows": 27733
+          },
+          "spanr": {
+            "ordered_pair_ids_sha256": "93b84d8fb09a693d0e47d460156fd0c510c8ff67f45b350531cf54c98609fa80",
+            "positives": 1048,
+            "rows": 27663
+          },
+          "spliceai": {
+            "ordered_pair_ids_sha256": "cacc2987de08f60013e3eee6fd8e91ba5a71febaa8e9ed24c7d8ee1c48bfaf81",
+            "positives": 1050,
+            "rows": 27733
+          },
+          "splicetransformer": {
+            "ordered_pair_ids_sha256": "cacc2987de08f60013e3eee6fd8e91ba5a71febaa8e9ed24c7d8ee1c48bfaf81",
+            "positives": 1050,
+            "rows": 27733
+          }
+        },
+        "methods": [
+          {
+            "name": "pangolin",
+            "score_column": "pangolin_score"
+          },
+          {
+            "name": "spliceai",
+            "score_column": "spliceai_score"
+          },
+          {
+            "name": "splicetransformer",
+            "score_column": "splicetransformer_score"
+          },
+          {
+            "name": "mmsplice",
+            "score_column": "mmsplice_score"
+          },
+          {
+            "name": "spanr",
+            "score_column": "spanr_score"
+          }
+        ],
+        "metrics": [
+          "auroc",
+          "average_precision",
+          "spearman_vs_loss"
+        ]
+      },
+      "identifiers": {
+        "component": {
+          "column": "component_id",
+          "expected_distinct": 2198,
+          "meaning": "Ensembl exon"
+        },
+        "pair": {
+          "column": "pair_id",
+          "unique": true
+        }
+      },
+      "input_pair": {
+        "allele_order": "GRCh38 reference then alternate",
+        "alternate_column": "alt_sequence",
+        "deduplicate": false,
+        "expected_distinct_reference_sequences": 2199,
+        "length": 170,
+        "orientation": "transcript",
+        "reference_column": "sequence"
+      },
+      "outputs": {
+        "compact": {
+          "columns": 23,
+          "path": "MFASS/mfass.parquet",
+          "rows": 28972
+        },
+        "full": {
+          "columns": 92,
+          "compact_projection": "ordered first 23 columns",
+          "path": "MFASS/mfass-full.parquet",
+          "rows": 28972
+        },
+        "metrics": {
+          "columns": 8,
+          "path": "MFASS/published_metrics.parquet",
+          "rows": 5
+        }
+      },
+      "rows": 28972,
+      "split": "test",
+      "targets": {
+        "classification": {
+          "column": "label",
+          "definition": "delta_psi <= -0.50",
+          "evaluable_rows": 27733,
+          "nullable": true,
+          "positive_rows": 1050
+        },
+        "quantitative": {
+          "alternate_inclusion_column": "alt_inclusion",
+          "definition": "alternate minus reference exon inclusion",
+          "nullable": true,
+          "primary_column": "delta_psi",
+          "reference_inclusion_column": "ref_inclusion",
+          "replicate_columns": [
+            "delta_psi_rep1",
+            "delta_psi_rep2"
+          ]
+        }
+      },
+      "task": "mfass"
+    }
+  },
+  "manifest_version": 1,
+  "outputs": {
+    "MFASS/mfass-full.parquet": {
+      "arrow_schema": [
+        {
+          "name": "split",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "source_index",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "pair_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "component_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "sequence",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "alt_sequence",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "label",
+          "nullable": true,
+          "type": "bool"
+        },
+        {
+          "name": "delta_psi",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "delta_psi_rep1",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "delta_psi_rep2",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "ref_inclusion",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "alt_inclusion",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "chrom",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "position",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "ref",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "alt",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "strand",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "variant_offset",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "exon_start",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "exon_end",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "region",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "splice_site_offset",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "assay_hg38_alignment",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "ensembl_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "sub_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "chr",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "start",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "end",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "source_strand",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "intron1_len",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "exon_len",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "intron2_len",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "ref_allele",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "alt_allele",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "snp_position",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "vcf_id",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "rel_position",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "source_sequence",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "start_hg38_0based",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "end_hg38_0based",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "snp_position_hg38_0based_start",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "snp_position_hg38_1based",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "snp_position_hg38_0based_end",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "source_region",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "rel_position_feature",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "rel_position_scaled",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "original_seq",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "mixed_seq",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "natural_seq",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "category",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "v1_R1_sum",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_R2_sum",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_index_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_index_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_index",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_R1_sum",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_R2_sum",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_index_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_index_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_index",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v1_index_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v1_index_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v2_index_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v2_index_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_dpsi_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v1_dpsi_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_dpsi_R1",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_dpsi_R2",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v1_index",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_v2_index",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "nat_seq",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "v1_dpsi",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "v2_dpsi",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "delta_dpsi",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "strong_lof",
+          "nullable": true,
+          "type": "bool"
+        },
+        {
+          "name": "strong_lof_v1",
+          "nullable": true,
+          "type": "bool"
+        },
+        {
+          "name": "published_label",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "published_dpsi",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "spanr_score",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "pangolin_score",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "spliceai_score",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "splicetransformer_score",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "mmsplice_score",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "source_label",
+          "nullable": true,
+          "type": "bool"
+        },
+        {
+          "name": "orientation_action",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "region_edit_distance",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "region_substitutions",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "region_insertions",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "region_deletions",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "distance_to_splice_site",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "is_evaluable",
+          "nullable": true,
+          "type": "bool"
+        }
+      ],
+      "bytes": 5857808,
+      "rows": 28972,
+      "sha256": "723257a5e30f1149152ecb34cc318a566226c3e99720f6743f8fdcbcff55ef15"
+    },
+    "MFASS/mfass.parquet": {
+      "arrow_schema": [
+        {
+          "name": "split",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "source_index",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "pair_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "component_id",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "sequence",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "alt_sequence",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "label",
+          "nullable": true,
+          "type": "bool"
+        },
+        {
+          "name": "delta_psi",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "delta_psi_rep1",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "delta_psi_rep2",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "ref_inclusion",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "alt_inclusion",
+          "nullable": true,
+          "type": "float"
+        },
+        {
+          "name": "chrom",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "position",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "ref",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "alt",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "strand",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "variant_offset",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "exon_start",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "exon_end",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "region",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "splice_site_offset",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "assay_hg38_alignment",
+          "nullable": true,
+          "type": "large_string"
+        }
+      ],
+      "bytes": 1310837,
+      "rows": 28972,
+      "sha256": "b4f2b985279f4054163239f73cab965ea0c1a07ae38976a430912202ed15b3e8"
+    },
+    "MFASS/published_metrics.parquet": {
+      "arrow_schema": [
+        {
+          "name": "method",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "n",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "positives",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "auroc",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "average_precision",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "spearman_vs_loss",
+          "nullable": true,
+          "type": "double"
+        },
+        {
+          "name": "score_column",
+          "nullable": true,
+          "type": "large_string"
+        },
+        {
+          "name": "source",
+          "nullable": true,
+          "type": "large_string"
+        }
+      ],
+      "bytes": 5775,
+      "rows": 5,
+      "sha256": "bed18e31e72fc561d568e39cf78088895f796db7a826f06f0d9aef7484b45a8e"
+    }
+  },
+  "sources": {
+    "grch38_no_alt_reference": {
+      "artifact": "GRCh38 no-alt analysis-set FASTA with UCSC sequence names",
+      "compression": "gzip",
+      "download": {
+        "bytes": 872949833,
+        "md5": "a08035b6a6e31780e96a34008ff21bd6"
+      },
+      "identity": {
+        "accession": "GCA_000001405.15",
+        "assembly": "GRCh38",
+        "file": "GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz",
+        "md5_manifest_url": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/md5checksums.txt"
+      },
+      "local_path": "reference/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta",
+      "materialized": {
+        "bytes": 3144230986,
+        "sha256": "9cce8b926416dd96b152deea85188495b75f7ac8d634cc723a017067be8702b7"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "terms_urls": [
+          "https://www.ncbi.nlm.nih.gov/home/about/policies/",
+          "https://www.ncbi.nlm.nih.gov/datasets/genome/GCA_000001405.15/"
+        ]
+      },
+      "url": "https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz"
+    },
+    "mfass_labels": {
+      "artifact": "MFASS labels, dPSI values, and SPANR scores released by SpliceConsensus",
+      "download": {
+        "bytes": 1368619,
+        "sha256": "ce6e3b584ae8fe07d52f1f2611689c6d68ed531c4d2b5b073af94851c146cd7c"
+      },
+      "identity": {
+        "path": "data/mfass_labels.csv",
+        "repository": "https://github.com/brhanufen/spliceconsensus",
+        "revision": "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
+      },
+      "local_path": "published/mfass_labels.csv",
+      "materialized": {
+        "bytes": 1368619,
+        "sha256": "ce6e3b584ae8fe07d52f1f2611689c6d68ed531c4d2b5b073af94851c146cd7c"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "declared_repository_license": "MIT",
+        "terms_urls": [
+          "https://github.com/brhanufen/spliceconsensus/blob/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/LICENSE",
+          "https://github.com/KosuriLab/MFASS/tree/3b1b2bdaea828283508ba22cdd8d0c431ea70dea"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/brhanufen/spliceconsensus/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/data/mfass_labels.csv"
+    },
+    "mfass_measurements": {
+      "artifact": "Canonical processed MFASS SNV measurement table",
+      "download": {
+        "bytes": 41445250,
+        "sha256": "a637ca0e307e66ff48811ec7efa22b9ce453bc7883b04f0cacb867f7283132d8"
+      },
+      "identity": {
+        "path": "processed_data/snv/snv_data_clean.txt",
+        "repository": "https://github.com/KosuriLab/MFASS",
+        "revision": "3b1b2bdaea828283508ba22cdd8d0c431ea70dea"
+      },
+      "local_path": "source/snv_data_clean.txt",
+      "materialized": {
+        "bytes": 41445250,
+        "sha256": "a637ca0e307e66ff48811ec7efa22b9ce453bc7883b04f0cacb867f7283132d8"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "terms_urls": [
+          "https://github.com/KosuriLab/MFASS/tree/3b1b2bdaea828283508ba22cdd8d0c431ea70dea",
+          "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE120695",
+          "https://doi.org/10.1016/j.molcel.2018.10.037"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/KosuriLab/MFASS/3b1b2bdaea828283508ba22cdd8d0c431ea70dea/processed_data/snv/snv_data_clean.txt"
+    },
+    "mmsplice_scores": {
+      "artifact": "Released MFASS MMSplice scores",
+      "download": {
+        "bytes": 1126430,
+        "sha256": "b05b07be7db19a39a040963885f5053ad164b851cebad377113747f0a227dec0"
+      },
+      "identity": {
+        "path": "results/scores_mmsplice.csv",
+        "repository": "https://github.com/brhanufen/spliceconsensus",
+        "revision": "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
+      },
+      "local_path": "published/scores_mmsplice.csv",
+      "materialized": {
+        "bytes": 1126430,
+        "sha256": "b05b07be7db19a39a040963885f5053ad164b851cebad377113747f0a227dec0"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "declared_repository_license": "MIT",
+        "terms_urls": [
+          "https://github.com/brhanufen/spliceconsensus/blob/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/LICENSE"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/brhanufen/spliceconsensus/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/results/scores_mmsplice.csv"
+    },
+    "pangolin_scores": {
+      "artifact": "Released MFASS Pangolin scores",
+      "download": {
+        "bytes": 1213443,
+        "sha256": "c76ce4fbe4c5c979c4e1534068e72354223f0d5c62d3f7e91e1f4fccd16341fa"
+      },
+      "identity": {
+        "path": "results/scores_pangolin.csv",
+        "repository": "https://github.com/brhanufen/spliceconsensus",
+        "revision": "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
+      },
+      "local_path": "published/scores_pangolin.csv",
+      "materialized": {
+        "bytes": 1213443,
+        "sha256": "c76ce4fbe4c5c979c4e1534068e72354223f0d5c62d3f7e91e1f4fccd16341fa"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "declared_repository_license": "MIT",
+        "terms_urls": [
+          "https://github.com/brhanufen/spliceconsensus/blob/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/LICENSE"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/brhanufen/spliceconsensus/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/results/scores_pangolin.csv"
+    },
+    "spliceai_scores": {
+      "artifact": "Released MFASS SpliceAI scores",
+      "download": {
+        "bytes": 708545,
+        "sha256": "2e923e60c7611486ebcd95797c3e436807535d9463be4685dcc8e44b13239776"
+      },
+      "identity": {
+        "path": "results/scores_spliceai.csv",
+        "repository": "https://github.com/brhanufen/spliceconsensus",
+        "revision": "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
+      },
+      "local_path": "published/scores_spliceai.csv",
+      "materialized": {
+        "bytes": 708545,
+        "sha256": "2e923e60c7611486ebcd95797c3e436807535d9463be4685dcc8e44b13239776"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "declared_repository_license": "MIT",
+        "terms_urls": [
+          "https://github.com/brhanufen/spliceconsensus/blob/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/LICENSE"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/brhanufen/spliceconsensus/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/results/scores_spliceai.csv"
+    },
+    "splicetransformer_scores": {
+      "artifact": "Released MFASS SpliceTransformer scores",
+      "download": {
+        "bytes": 1126509,
+        "sha256": "d482551808825d2de59952d006a8524f97efec451db01201544ef3a08e6d3a8f"
+      },
+      "identity": {
+        "path": "results/scores_splicetx.csv",
+        "repository": "https://github.com/brhanufen/spliceconsensus",
+        "revision": "cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82"
+      },
+      "local_path": "published/scores_splicetx.csv",
+      "materialized": {
+        "bytes": 1126509,
+        "sha256": "d482551808825d2de59952d006a8524f97efec451db01201544ef3a08e6d3a8f"
+      },
+      "rights": {
+        "artifact_license": "NOASSERTION",
+        "declared_repository_license": "MIT",
+        "terms_urls": [
+          "https://github.com/brhanufen/spliceconsensus/blob/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/LICENSE"
+        ]
+      },
+      "url": "https://raw.githubusercontent.com/brhanufen/spliceconsensus/cdb411fd5fc30dd811284f7c59ce1b5acf4e9c82/results/scores_splicetx.csv"
+    }
+  }
+}

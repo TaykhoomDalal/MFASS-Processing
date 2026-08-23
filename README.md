@@ -22,8 +22,7 @@ No source datasets or model weights are committed.
 MFASS/
 |-- mfass.parquet
 |-- mfass-full.parquet       # with --full
-|-- published_metrics.parquet
-`-- manifest.json
+`-- published_metrics.parquet
 ```
 
 `mfass.parquet` contains 28,972 variants and the 23-column public contract.
@@ -34,12 +33,33 @@ and `alt_sequence` carries the alternate allele.
 
 `mfass-full.parquet` starts with the same public contract, then preserves all
 54 source columns, released baseline scores, and orientation/alignment audit
-fields. The three colliding source names are exposed as `source_sequence`,
-`source_region`, and `source_strand`.
+fields, for 92 columns total. The three colliding source names are exposed as
+`source_sequence`, `source_region`, and `source_strand`.
+
+`published_metrics.parquet` has five rows and eight columns. It records the
+reproduced Pangolin, SpliceAI, SpliceTransformer, MMSplice, and SPANR metrics
+and their evaluation counts.
+
+`pair_id` is the unique row key. `sequence` is not: variants from the same
+exon intentionally reuse the same reference assay construct. There are 2,199
+distinct `sequence` values among 28,972 rows, and these rows must not be
+deduplicated.
 
 Neither output stores an arbitrary fixed genomic window. Any desired context
 can be extracted from `chrom`, 1-based `position`, `ref`, and `alt` using the
 pinned GRCh38 reference.
+
+The 170 bp assay strings are transcript-oriented. In contrast, `chrom`,
+`position`, `ref`, and `alt` describe forward-genome GRCh38. Thus, for a
+minus-strand row, the assay base is the complement of the corresponding
+forward-genome allele.
+
+Source row order is preserved, and the compact table must be the ordered first
+23-column projection of the full table. Within each 170 bp assay string,
+`variant_offset` and `exon_start` are zero-based and `exon_end` is exclusive.
+The machine-readable version of this row, sequence, coordinate, output, and
+evaluation contract is embedded in
+[`manifest.json`](manifest.json).
 
 ## Hugging Face
 
@@ -69,6 +89,20 @@ The complete lifted assay interval is also aligned to the measured construct.
 There are 2,195 exact exon matches, two one-base assembly substitutions, and
 one one-base hg38 insertion. No row is dropped.
 
+## Limitations and explicit exceptions
+
+- The pipeline starts from the authors' processed table and released scores;
+  it does not reproduce raw-read processing or rerun the five models.
+- The source has 1,239 rows without the two-replicate benchmark label/dPSI.
+  Four metrics therefore use 27,733 rows; SPANR has 70 additional missing
+  evaluable scores and uses 27,663.
+- `split` is always `test`; MFASS does not publish train/validation splits.
+- The full-output names `source_sequence`, `source_region`, and
+  `source_strand` intentionally resolve collisions with compact columns.
+- The six reverse-complemented exons, single reference-swap variant, and three
+  non-exact whole-assay alignments described above are reported exceptions,
+  not silently corrected or dropped.
+
 ## Reproducibility
 
 The measurement table is pinned to KosuriLab/MFASS commit
@@ -79,25 +113,68 @@ Baseline scores are pinned to `brhanufen/spliceconsensus` commit
 
 The reference is NCBI's complete GRCh38 no-alt analysis set
 `GCA_000001405.15`, using UCSC chromosome names. Every download is checked by
-SHA-256.
+content hash and byte size; the compressed NCBI FASTA is also checked against
+NCBI's published MD5.
+
+[`manifest.json`](manifest.json) is the single tracked provenance authority:
+
+- `sources` owns source identities, URLs, hashes, and byte sizes and is
+  consumed by acquisition;
+- `outputs` records golden hashes, bytes, rows, and Arrow schemas; and
+- `contracts` records the verifier-consumed input-pair, target, evaluation,
+  identifier, coordinate, and sequence semantics, including ordered metric
+  membership.
+
+Generated files under `data/` and `MFASS/` are ignored and are not used as
+mutable provenance evidence. There are no separate source/input/output
+manifest variants. Normal builds do not rewrite the tracked manifest. After
+an intentional reviewed output change, first run a full build, then refresh
+its generated evidence with:
+
+```bash
+python scripts/build_manifest.py --full
+```
+
+The manifest builder refuses compact-only registration. It stages a candidate
+manifest, runs full verification against compact, full, and metrics outputs,
+and installs it only after verification succeeds. Thus a compact build can
+never hash or register a leftover `mfass-full.parquet`.
+
+Network acquisition uses three bounded attempts, a 120-second socket timeout,
+and bounded backoff. Downloads are checked by expected bytes and digest;
+reused local files receive the same materialized checks. The compressed NCBI
+FASTA is checked by its published MD5 before decompression and by SHA-256
+afterward. Downloads, symlinks, Parquets, JSON, and the exact two-file Hugging
+Face release are staged before replacement so incomplete files do not become
+published artifacts.
 
 ## Build
 
 ```bash
-bash scripts/create_environment.sh
-mamba activate mfass-processing
+bash scripts/create_environment.sh --locked
 bash scripts/run_all.sh
 ```
 
-To reuse existing inputs:
+The compact output is the default. Build and verify the exhaustive output
+with:
 
 ```bash
-python scripts/download_data.py \
+bash scripts/run_all.sh --full
+```
+
+`run_all.sh` always invokes the named `mfass-processing` Mamba environment.
+`environment.yml` is the maintained solve;
+`environment-lock-linux-64.txt` plus `requirements-lock.txt` are the audited
+Linux lock (the separate requirements lock exists because pyfaidx is installed
+with pip).
+To select one input root and reuse existing sources consistently:
+
+```bash
+bash scripts/run_all.sh --full \
+  --data-root /path/to/mfass-data \
   --reuse-source /path/to/snv_data_clean.txt \
   --reuse-benchmark-root /path/to/spliceconsensus \
   --reuse-fasta /path/to/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta
-python MFASS/process.py --full
-python scripts/verify_outputs.py --full
 ```
 
 Build the compact Hugging Face release:
@@ -105,6 +182,13 @@ Build the compact Hugging Face release:
 ```bash
 python scripts/build_hf_release.py --output /path/to/mfass
 ```
+
+The release builder verifies the compact output, stages a fresh exact
+allowlist, and leaves only `README.md` and `mfass.parquet` (plus Git metadata)
+in the Hugging Face repository. It refuses a dirty processing repository and
+must be run after the parent processing commit. The rendered card embeds that
+exact commit, its raw root-manifest URL, and the committed manifest SHA-256;
+no HF-side manifest file is created.
 
 ## Published baseline reproduction
 
@@ -118,12 +202,13 @@ python scripts/build_hf_release.py --output /path/to/mfass
 
 ## Citation
 
-Chong, R. et al. *A multiplexed assay for exon recognition reveals that an
+Cheung, R. et al. *A multiplexed assay for exon recognition reveals that an
 unappreciated fraction of rare genetic variants cause large-effect splicing
 disruptions*. Molecular Cell 73, 183-194.e8 (2019).
 https://doi.org/10.1016/j.molcel.2018.10.037
 
 ## License
 
-The processing code is MIT licensed. The MFASS measurements and external
-scores retain their original terms; see [NOTICE.md](NOTICE.md).
+The processing code is MIT licensed. No license is asserted for the combined
+data artifacts (`NOASSERTION`); see [NOTICE.md](NOTICE.md) for authoritative
+upstream links and the unresolved MFASS redistribution question.

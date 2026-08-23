@@ -13,15 +13,14 @@ from pyfaidx import Fasta
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common import (
+from scripts.common import (
     COMPLEMENT,
     align_sequences,
     reverse_complement,
     sha256,
-    write_json,
     write_parquet,
 )
-from scripts.download_data import ASSETS, FASTA_SHA256
+from scripts.download_data import materialized_sources
 
 
 EXPECTED_ROWS = 28_972
@@ -78,25 +77,26 @@ EXPECTED_METRICS = {
 
 
 def validate_inputs(data_root: Path) -> dict[str, str]:
-    expected = {
-        relative: record["sha256"]
-        for relative, record in ASSETS.items()
-    }
-    fasta = (
-        data_root / "reference"
-        / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
-    )
-    expected[str(fasta.relative_to(data_root))] = FASTA_SHA256
-    for relative, digest in expected.items():
+    expected = materialized_sources()
+    for relative, record in expected.items():
         path = data_root / relative
         if not path.is_file():
             raise RuntimeError(f"missing pinned input: {path}")
-        observed = sha256(path)
-        if observed != digest:
+        observed_bytes = path.stat().st_size
+        if observed_bytes != record["bytes"]:
             raise RuntimeError(
-                f"{path}: expected sha256 {digest}, got {observed}"
+                f"{path}: expected {record['bytes']} bytes, "
+                f"got {observed_bytes}"
             )
-    return expected
+        observed = sha256(path)
+        if observed != record["sha256"]:
+            raise RuntimeError(
+                f"{path}: expected sha256 {record['sha256']}, got {observed}"
+            )
+    return {
+        relative: record["sha256"]
+        for relative, record in expected.items()
+    }
 
 
 def nullable_bool(series: pd.Series) -> pd.Series:
@@ -499,7 +499,7 @@ def main() -> None:
         args.data_root / "reference"
         / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
     )
-    compact, full, orientation = build_frames(frame, fasta)
+    compact, full, _orientation = build_frames(frame, fasta)
     metrics = published_metrics(frame)
     if validate_inputs(args.data_root) != input_hashes:
         raise RuntimeError("pinned input changed during processing")
@@ -521,41 +521,6 @@ def main() -> None:
         outputs.append(full_path)
     write_parquet(metrics, metrics_path)
     outputs.append(metrics_path)
-    manifest = {
-        "rows": len(compact),
-        "evaluable_rows": int(compact.delta_psi.notna().sum()),
-        "source_positive_labels": int(
-            frame.source_label.fillna(False).sum()
-        ),
-        "normalized_positive_labels": int(
-            compact.label.fillna(False).sum()
-        ),
-        "exons": int(compact.component_id.nunique()),
-        "compact_columns": COMPACT_COLUMNS,
-        "reference": {
-            "assembly": "GRCh38 no-alt GCA_000001405.15",
-            "chromosome_names": "UCSC chr-prefixed",
-            "position": "1-based",
-            "sequence_length": 170,
-            "sequence_orientation": "transcript",
-            "allele_order": "GRCh38 reference then alternate",
-        },
-        "orientation": orientation,
-        "inputs": {
-            **{
-                f"data/{relative}": digest
-                for relative, digest in input_hashes.items()
-            },
-            "data/input_manifest.json": sha256(
-                args.data_root / "input_manifest.json"
-            ),
-        },
-        "outputs": {
-            path.name: sha256(path)
-            for path in outputs
-        },
-    }
-    write_json(args.output / "manifest.json", manifest)
     names = ", ".join(path.name for path in outputs)
     print(f"wrote {len(compact):,} rows to {names}")
 

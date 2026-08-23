@@ -2,7 +2,7 @@ __pycache__/
 *.py[cod]
 *.log
 
+# Generated inputs and outputs. Golden manifests are tracked at repository root.
 data/
 MFASS/*.parquet
-MFASS/manifest.json
 release/
