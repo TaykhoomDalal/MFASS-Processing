@@ -57,9 +57,6 @@ forward-genome allele.
 Source row order is preserved, and the compact table must be the ordered first
 23-column projection of the full table. Within each 170 bp assay string,
 `variant_offset` and `exon_start` are zero-based and `exon_end` is exclusive.
-The machine-readable version of this row, sequence, coordinate, output, and
-evaluation contract is embedded in
-[`manifest.json`](manifest.json).
 
 ## Hugging Face
 
@@ -116,29 +113,17 @@ The reference is NCBI's complete GRCh38 no-alt analysis set
 content hash and byte size; the compressed NCBI FASTA is also checked against
 NCBI's published MD5.
 
-[`manifest.json`](manifest.json) is the single tracked provenance authority:
-
-- `sources` owns source identities, URLs, hashes, and byte sizes and is
-  consumed by acquisition;
-- `outputs` records golden hashes, bytes, rows, and Arrow schemas; and
-- `contracts` records the verifier-consumed input-pair, target, evaluation,
-  identifier, coordinate, and sequence semantics, including ordered metric
-  membership.
-
-Generated files under `data/` and `MFASS/` are ignored and are not used as
-mutable provenance evidence. There are no separate source/input/output
-manifest variants. Normal builds do not rewrite the tracked manifest. After
-an intentional reviewed output change, first run a full build, then refresh
-its generated evidence with:
+[`manifest.json`](manifest.json) pins the source files and expected generated
+outputs used by the downloader and verifier. Generated files under `data/`
+and `MFASS/` remain ignored. After an intentional reviewed output change,
+first run a full build, then refresh the recorded hashes with:
 
 ```bash
 python scripts/build_manifest.py --full
 ```
 
-The manifest builder refuses compact-only registration. It stages a candidate
-manifest, runs full verification against compact, full, and metrics outputs,
-and installs it only after verification succeeds. Thus a compact build can
-never hash or register a leftover `mfass-full.parquet`.
+The manifest builder requires a verified full build, so an old
+`mfass-full.parquet` cannot be registered accidentally.
 
 Network acquisition uses three bounded attempts, a 120-second socket timeout,
 and bounded backoff. Downloads are checked by expected bytes and digest;
@@ -186,9 +171,8 @@ python scripts/build_hf_release.py --output /path/to/mfass
 The release builder verifies the compact output, stages a fresh exact
 allowlist, and leaves only `README.md` and `mfass.parquet` (plus Git metadata)
 in the Hugging Face repository. It refuses a dirty processing repository and
-must be run after the parent processing commit. The rendered card embeds that
-exact commit, its raw root-manifest URL, and the committed manifest SHA-256;
-no HF-side manifest file is created.
+must be run after the parent processing commit. No manifest file is added to
+the Hugging Face repository.
 
 ## Published baseline reproduction
 
