@@ -28,10 +28,10 @@ native exon-inclusion measurements, assay-relative geometry, and canonical
 GRCh38 locus. Of the 28,972 rows, 27,733 are evaluable and 1,050 are labeled
 splice-disrupting variants.
 
-`pair_id` is the unique row key. `sequence` is deliberately not unique:
-different tested variants in the same exon share the same reference
-construct. The table contains 2,199 distinct reference `sequence` values, and
-rows must not be deduplicated by sequence.
+**Row identity:** `pair_id` is the unique row key. `sequence` is deliberately
+not unique: different tested variants in the same exon share the same
+reference construct. The table contains 2,199 distinct reference `sequence`
+values. Never deduplicate these rows by sequence.
 
 ## Loading
 
@@ -158,5 +158,9 @@ not state explicit redistribution terms for the processed measurements.
 Users must review the original MFASS, SpliceConsensus/source-model, NCBI
 reference, and publication terms. See the commit-pinned processing
 [`NOTICE.md`](https://github.com/TaykhoomDalal/MFASS-Processing/blob/{{PROCESSING_COMMIT}}/NOTICE.md)
-for authoritative links; permission for downstream MFASS redistribution
-remains unresolved.
+for authoritative links.
+
+Permission for third-party redistribution of the processed MFASS measurements
+and derivatives in this repackaged form remains unresolved; obtain
+clarification or permission from the MFASS rights holders before
+redistribution.

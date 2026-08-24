@@ -16,6 +16,8 @@ The following data artifacts are marked **`NOASSERTION`**:
 
 `NOASSERTION` is a rights-status marker, not a license and not a restriction
 invented by this repository.
+The Hugging Face card uses `license: other` solely to represent this
+`NOASSERTION` status; it does not grant a new license.
 
 ## Authoritative upstream links
 
@@ -31,10 +33,12 @@ declaration:
   <https://doi.org/10.1016/j.molcel.2018.10.037>
 
 Public availability and required citation do not by themselves establish a
-right to redistribute the processed measurements or derivatives. The
-unresolved rights question is whether the MFASS rights holders authorize
-third-party redistribution in this repackaged form; obtain clarification or
-permission when required.
+right to redistribute the processed measurements or derivatives.
+
+Permission for third-party redistribution of the processed MFASS measurements
+and derivatives in this repackaged form remains unresolved; obtain
+clarification or permission from the MFASS rights holders before
+redistribution.
 
 ### Released baseline scores
 

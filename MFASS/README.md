@@ -15,10 +15,10 @@ The public file contains 28,972 rows and 23 columns:
 - `chrom`, `position`, `ref`, and `alt` are sufficient to extract any desired
   genomic context from the pinned GRCh38 reference.
 
-`pair_id` is the unique row key. Reference `sequence` values are intentionally
-shared by different variants from the same exon and must not be deduplicated.
-The assay strings are transcript-oriented, while `ref` and `alt` are
-forward-genome GRCh38 bases.
+**Row identity:** `pair_id` is the unique row key. Reference `sequence` values
+are intentionally shared by different variants from the same exon. Never
+deduplicate these rows by sequence. The assay strings are transcript-oriented,
+while `ref` and `alt` are forward-genome GRCh38 bases.
 
 ## `mfass-full.parquet`
 
@@ -45,10 +45,21 @@ against the original MFASS label.
 bash scripts/run_all.sh --full
 ```
 
-The verifier checks the tracked top-level `manifest.json`, reconstructs
-the outputs, checks that compact is the ordered projection of full, and
-independently reconstructs each metric mask and ordered `pair_id` membership.
+The verifier keeps the tracked hashes and Arrow schemas as golden evidence,
+then uses a compact oracle independent of the production frame builders to
+derive row keys, normalized targets, alleles, sequence pairs, and focal
+geometry directly from the pinned MFASS table and GRCh38. It also checks that
+compact is the ordered projection of full and independently reconstructs each
+metric mask and ordered `pair_id` membership.
 
 See `../README.md` and the verifier-consumed contract embedded in
 `../manifest.json` for the coordinate, generated-data, environment,
 exception, and limitation contracts.
+
+Artifact-level status is `NOASSERTION`; Hugging Face uses `license: other`,
+which does not grant a new license.
+
+Permission for third-party redistribution of the processed MFASS measurements
+and derivatives in this repackaged form remains unresolved; obtain
+clarification or permission from the MFASS rights holders before
+redistribution.

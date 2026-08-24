@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -10,24 +11,17 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pyfaidx import Fasta
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from MFASS.process import (
-    COMPACT_COLUMNS,
-    EXPECTED_EVALUABLE,
-    EXPECTED_POSITIVES,
-    EXPECTED_ROWS,
-    build_frames,
-    load_inputs,
-    published_metrics,
-    validate_inputs,
-)
 from scripts.common import sha256
-from scripts.download_data import load_manifest
 
 
+EXPECTED_ROWS = 28_972
+EXPECTED_EVALUABLE = 27_733
+EXPECTED_POSITIVES = 1_050
 EXPECTED_METHODS = (
     "pangolin",
     "spliceai",
@@ -43,6 +37,64 @@ SCORE_FILES = {
         "splicetransformer_score",
     ),
     "mmsplice": ("scores_mmsplice.csv", "mmsplice_score"),
+}
+EXPECTED_COMPACT_COLUMNS = [
+    "split",
+    "source_index",
+    "pair_id",
+    "component_id",
+    "sequence",
+    "alt_sequence",
+    "label",
+    "delta_psi",
+    "delta_psi_rep1",
+    "delta_psi_rep2",
+    "ref_inclusion",
+    "alt_inclusion",
+    "chrom",
+    "position",
+    "ref",
+    "alt",
+    "strand",
+    "variant_offset",
+    "exon_start",
+    "exon_end",
+    "region",
+    "splice_site_offset",
+    "assay_hg38_alignment",
+]
+EXPECTED_OUTPUT_PATHS = {
+    "MFASS/mfass.parquet",
+    "MFASS/mfass-full.parquet",
+    "MFASS/published_metrics.parquet",
+}
+ORACLE_SOURCE_COLUMNS = [
+    "id",
+    "ensembl_id",
+    "chr",
+    "strand",
+    "intron1_len",
+    "exon_len",
+    "intron2_len",
+    "ref_allele",
+    "alt_allele",
+    "rel_position",
+    "snp_position_hg38_1based",
+    "label",
+    "rel_position_feature",
+    "original_seq",
+    "natural_seq",
+    "category",
+    "v2_dpsi_R1",
+    "v2_dpsi_R2",
+    "v2_index",
+    "nat_v2_index",
+    "v2_dpsi",
+]
+REGION_NAMES = {
+    "upstr_intron": "upstream_intron",
+    "exon": "exon",
+    "downstr_intron": "downstream_intron",
 }
 COMPLEMENT = str.maketrans("ACGT", "TGCA")
 
@@ -114,7 +166,7 @@ def verify_output_record(
 
 
 def load_golden_manifest(path: Path) -> dict:
-    manifest = load_manifest(path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
     require(
         set(manifest) == {
             "manifest_version",
@@ -123,6 +175,15 @@ def load_golden_manifest(path: Path) -> dict:
             "contracts",
         },
         "manifest must contain only sources, outputs, and contracts metadata",
+    )
+    require(
+        manifest["manifest_version"] == 1,
+        "unsupported manifest version",
+    )
+    require(
+        isinstance(manifest["outputs"], dict)
+        and set(manifest["outputs"]) == EXPECTED_OUTPUT_PATHS,
+        "manifest must contain exactly the three supported outputs",
     )
     require(
         set(manifest["sources"])
@@ -145,6 +206,7 @@ def load_golden_manifest(path: Path) -> dict:
             and isinstance(record.get("download"), dict)
             and isinstance(record.get("materialized"), dict)
             and isinstance(record.get("rights"), dict)
+            and record["rights"].get("artifact_license") == "NOASSERTION"
             and str(record.get("url", "")).startswith("https://"),
             f"invalid source record: {name}",
         )
@@ -158,6 +220,30 @@ def load_golden_manifest(path: Path) -> dict:
         "source local paths must be unique",
     )
     return manifest
+
+
+def validate_inputs(golden: dict, data_root: Path) -> dict[str, str]:
+    observed = {}
+    for name, record in golden["sources"].items():
+        relative = Path(record["local_path"])
+        require(
+            not relative.is_absolute() and ".." not in relative.parts,
+            f"invalid source path: {relative}",
+        )
+        path = data_root / relative
+        expected = record["materialized"]
+        require(path.is_file(), f"missing pinned input: {path}")
+        require(
+            path.stat().st_size == expected["bytes"],
+            f"{name}: source byte size changed",
+        )
+        digest = sha256(path)
+        require(
+            digest == expected["sha256"],
+            f"{name}: expected sha256 {expected['sha256']}, got {digest}",
+        )
+        observed[str(relative)] = digest
+    return observed
 
 
 def load_processing_contract(golden: dict) -> dict:
@@ -288,8 +374,12 @@ def load_processing_contract(golden: dict) -> dict:
 
     outputs = contract["outputs"]
     require(
+        set(outputs) == {"compact", "full", "metrics"},
+        "processing contract must contain exactly three outputs",
+    )
+    require(
         outputs["compact"]["path"] == "MFASS/mfass.parquet"
-        and outputs["compact"]["columns"] == len(COMPACT_COLUMNS),
+        and outputs["compact"]["columns"] == len(EXPECTED_COMPACT_COLUMNS),
         "unexpected compact output contract",
     )
     require(
@@ -311,12 +401,15 @@ def load_processing_contract(golden: dict) -> dict:
             f"processing contract differs from golden output: {output['path']}",
         )
 
-    compact_columns = {
-        field["name"]
-        for field in golden["outputs"][
-            outputs["compact"]["path"]
-        ]["arrow_schema"]
-    }
+    compact_schema = golden["outputs"][
+        outputs["compact"]["path"]
+    ]["arrow_schema"]
+    require(
+        [field["name"] for field in compact_schema]
+        == EXPECTED_COMPACT_COLUMNS,
+        "unexpected ordered compact column contract",
+    )
+    compact_columns = {field["name"] for field in compact_schema}
     full_columns = {
         field["name"]
         for field in golden["outputs"][
@@ -389,84 +482,214 @@ def ordered_id_hash(values: pd.Series) -> str:
     return digest.hexdigest()
 
 
-def independent_compact_checks(
-    compact: pd.DataFrame, contract: dict
-) -> None:
-    quantitative = contract["targets"]["quantitative"]
-    classification = contract["targets"]["classification"]
-    primary = quantitative["primary_column"]
-    expected_quantitative = (
-        compact[quantitative["alternate_inclusion_column"]]
-        - compact[quantitative["reference_inclusion_column"]]
+def optional_float(value: object) -> float | None:
+    return None if pd.isna(value) else float(value)
+
+
+def build_compact_oracle(
+    data_root: Path, golden: dict
+) -> pd.DataFrame:
+    source_path = (
+        data_root
+        / golden["sources"]["mfass_measurements"]["local_path"]
     )
-    require(
-        compact[primary].notna().equals(expected_quantitative.notna()),
-        "quantitative target null mask differs from inclusion measurements",
+    source = pd.read_csv(
+        source_path,
+        sep="\t",
+        usecols=ORACLE_SOURCE_COLUMNS,
+        low_memory=False,
     )
+    source["source_index"] = source.index.astype("int64")
+    source = source.loc[source.category.eq("mutant")].reset_index(drop=True)
     require(
-        np.allclose(
-            compact.loc[compact[primary].notna(), primary],
-            expected_quantitative.loc[compact[primary].notna()],
-            rtol=0,
-            atol=1e-6,
-        ),
-        "quantitative target is not alternate minus reference inclusion",
+        len(source) == EXPECTED_ROWS and not source.id.duplicated().any(),
+        "unexpected canonical mutant row set",
     )
 
-    expected_labels = compact[primary].le(-0.5).where(
-        compact[primary].notna()
-    ).astype("boolean")
+    fasta_path = (
+        data_root
+        / golden["sources"]["grch38_no_alt_reference"]["local_path"]
+    )
+    genome = Fasta(
+        fasta_path,
+        one_based_attributes=False,
+        rebuild=False,
+    )
     try:
-        pd.testing.assert_series_equal(
-            compact[classification["column"]],
-            expected_labels,
-            check_names=False,
-            check_dtype=True,
-            check_exact=True,
+        reference_bases = pd.Series(
+            [
+                str(
+                    genome[row.chr][
+                        int(row.snp_position_hg38_1based) - 1
+                    ]
+                ).upper()
+                for row in source.itertuples(index=False)
+            ],
+            index=source.index,
         )
-    except AssertionError as error:
-        raise RuntimeError(
-            f"compact label is not delta_psi <= -0.50: {error}"
-        ) from error
+    finally:
+        genome.close()
 
-    input_pair = contract["input_pair"]
-    sequence_length = input_pair["length"]
-    reference_column = input_pair["reference_column"]
-    alternate_column = input_pair["alternate_column"]
-    pair_column = contract["identifiers"]["pair"]["column"]
-    for row in compact.itertuples(index=False):
-        reference_sequence = getattr(row, reference_column)
-        alternate_sequence = getattr(row, alternate_column)
-        pair_id = getattr(row, pair_column)
+    source_refs = source.ref_allele.str.upper()
+    orientation_votes = pd.DataFrame({
+        "component_id": source.ensembl_id,
+        "direct": reference_bases.eq(source_refs).astype(int),
+        "reverse": reference_bases.eq(
+            source_refs.str.translate(COMPLEMENT)
+        ).astype(int),
+    }).groupby("component_id", sort=False)[["direct", "reverse"]].sum()
+    require(
+        not orientation_votes.direct.eq(
+            orientation_votes.reverse
+        ).any(),
+        "ambiguous independent exon-orientation vote",
+    )
+    identity_orientation = orientation_votes.direct.gt(
+        orientation_votes.reverse
+    ).to_dict()
+
+    rows = []
+    for row, reference_base in zip(
+        source.itertuples(index=False), reference_bases
+    ):
+        source_ref = str(row.ref_allele).upper()
+        source_alt = str(row.alt_allele).upper()
+        identity = identity_orientation[row.ensembl_id]
+        genomic_ref = (
+            source_ref
+            if identity
+            else source_ref.translate(COMPLEMENT)
+        )
+        genomic_alt = (
+            source_alt
+            if identity
+            else source_alt.translate(COMPLEMENT)
+        )
+        effect_sign = 1.0
+        if reference_base == genomic_alt:
+            genomic_ref, genomic_alt = genomic_alt, genomic_ref
+            effect_sign = -1.0
+        else:
+            require(
+                reference_base == genomic_ref,
+                f"{row.id}: neither source allele matches GRCh38",
+            )
+
+        strand = str(row.strand)
+        if not identity:
+            strand = "-" if strand == "+" else "+"
+        sequence = str(row.natural_seq).upper()
+        alt_sequence = str(row.original_seq).upper()
+        if effect_sign < 0:
+            sequence, alt_sequence = alt_sequence, sequence
+        variant_offset = int(row.rel_position) - 1
         differences = [
             index
             for index, (reference, alternate) in enumerate(
-                zip(reference_sequence, alternate_sequence)
+                zip(sequence, alt_sequence)
             )
             if reference != alternate
         ]
-        require(
-            len(reference_sequence)
-            == len(alternate_sequence)
-            == sequence_length
-            and differences == [row.variant_offset],
-            f"{pair_id}: invalid {sequence_length} bp assay pair",
-        )
         expected_ref = (
-            row.ref
-            if row.strand == "+"
-            else row.ref.translate(COMPLEMENT)
+            genomic_ref
+            if strand == "+"
+            else genomic_ref.translate(COMPLEMENT)
         )
         expected_alt = (
-            row.alt
-            if row.strand == "+"
-            else row.alt.translate(COMPLEMENT)
+            genomic_alt
+            if strand == "+"
+            else genomic_alt.translate(COMPLEMENT)
         )
         require(
-            reference_sequence[row.variant_offset] == expected_ref
-            and alternate_sequence[row.variant_offset] == expected_alt,
-            f"{pair_id}: assay/genome allele orientation mismatch",
+            len(sequence) == len(alt_sequence) == 170
+            and differences == [variant_offset]
+            and sequence[variant_offset] == expected_ref
+            and alt_sequence[variant_offset] == expected_alt,
+            f"{row.id}: source-derived assay geometry is invalid",
         )
+
+        delta_psi = optional_float(row.v2_dpsi)
+        replicate_1 = optional_float(row.v2_dpsi_R1)
+        replicate_2 = optional_float(row.v2_dpsi_R2)
+        ref_inclusion, alt_inclusion = (
+            (row.nat_v2_index, row.v2_index)
+            if effect_sign > 0
+            else (row.v2_index, row.nat_v2_index)
+        )
+        ref_inclusion = optional_float(ref_inclusion)
+        alt_inclusion = optional_float(alt_inclusion)
+        normalized_delta = (
+            None
+            if delta_psi is None
+            else effect_sign * delta_psi
+        )
+        require(
+            (normalized_delta is None)
+            == (ref_inclusion is None or alt_inclusion is None),
+            f"{row.id}: target and inclusion null masks disagree",
+        )
+        if normalized_delta is not None:
+            require(
+                np.isclose(
+                    normalized_delta,
+                    alt_inclusion - ref_inclusion,
+                    rtol=0,
+                    atol=1e-6,
+                ),
+                f"{row.id}: delta_psi is not alternate minus reference",
+            )
+        exon_start = int(
+            row.intron1_len
+            if row.strand == "+"
+            else row.intron2_len
+        )
+        rows.append({
+            "source_index": int(row.source_index),
+            "pair_id": str(row.id),
+            "component_id": str(row.ensembl_id),
+            "sequence": sequence,
+            "alt_sequence": alt_sequence,
+            "label": (
+                None
+                if normalized_delta is None
+                else normalized_delta <= -0.5
+            ),
+            "delta_psi": normalized_delta,
+            "delta_psi_rep1": (
+                None
+                if replicate_1 is None
+                else effect_sign * replicate_1
+            ),
+            "delta_psi_rep2": (
+                None
+                if replicate_2 is None
+                else effect_sign * replicate_2
+            ),
+            "ref_inclusion": ref_inclusion,
+            "alt_inclusion": alt_inclusion,
+            "chrom": str(row.chr),
+            "position": int(row.snp_position_hg38_1based),
+            "ref": genomic_ref,
+            "alt": genomic_alt,
+            "strand": strand,
+            "variant_offset": variant_offset,
+            "exon_start": exon_start,
+            "exon_end": exon_start + int(row.exon_len),
+            "region": REGION_NAMES[str(row.label)],
+            "splice_site_offset": int(row.rel_position_feature),
+        })
+
+    oracle = pd.DataFrame(rows)
+    oracle["label"] = oracle["label"].astype("boolean")
+    for column in (
+        "delta_psi",
+        "delta_psi_rep1",
+        "delta_psi_rep2",
+        "ref_inclusion",
+        "alt_inclusion",
+    ):
+        oracle[column] = oracle[column].astype("float32")
+    return oracle
 
 
 def independent_membership_checks(
@@ -651,18 +874,7 @@ def main() -> None:
     golden = load_golden_manifest(args.manifest)
     contract = load_processing_contract(golden)
     outputs = contract["outputs"]
-    before = validate_inputs(args.data_root)
-    source = load_inputs(args.data_root)
-    fasta = (
-        args.data_root / "reference"
-        / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta"
-    )
-    expected_compact, expected_full, _orientation = build_frames(
-        source, fasta
-    )
-    expected_metrics = published_metrics(source)
-    after = validate_inputs(args.data_root)
-    require(before == after, "pinned input changed during verification")
+    before = validate_inputs(golden, args.data_root)
 
     compact_path = args.output / Path(outputs["compact"]["path"]).name
     full_path = args.output / Path(outputs["full"]["path"]).name
@@ -687,18 +899,15 @@ def main() -> None:
     compact = pd.read_parquet(compact_path)
     metrics = pd.read_parquet(metrics_path)
     full = pd.read_parquet(full_path) if args.full else None
-    compare_frames("compact parquet", compact, expected_compact)
-    compare_frames("published metrics", metrics, expected_metrics)
     if full is not None:
-        compare_frames("full parquet", full, expected_full)
         compare_frames(
             "compact ordered projection of full",
             compact,
-            full.loc[:, COMPACT_COLUMNS],
+            full.loc[:, EXPECTED_COMPACT_COLUMNS],
         )
 
     require(
-        compact.columns.tolist() == COMPACT_COLUMNS,
+        compact.columns.tolist() == EXPECTED_COMPACT_COLUMNS,
         "unexpected compact column contract",
     )
     require(
@@ -734,10 +943,17 @@ def main() -> None:
             "full output must have 28,972 rows and 92 columns",
         )
 
-    independent_compact_checks(compact, contract)
+    oracle = build_compact_oracle(args.data_root, golden)
+    compare_frames(
+        "independent source-derived compact oracle",
+        compact.loc[:, oracle.columns],
+        oracle,
+    )
     independent_membership_checks(
         args.data_root, compact, metrics, full, contract
     )
+    after = validate_inputs(golden, args.data_root)
+    require(before == after, "pinned input changed during verification")
     detail = (
         ", 92-column full output and ordered compact projection"
         if args.full

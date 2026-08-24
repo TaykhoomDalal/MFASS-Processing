@@ -40,10 +40,10 @@ fields, for 92 columns total. The three colliding source names are exposed as
 reproduced Pangolin, SpliceAI, SpliceTransformer, MMSplice, and SPANR metrics
 and their evaluation counts.
 
-`pair_id` is the unique row key. `sequence` is not: variants from the same
-exon intentionally reuse the same reference assay construct. There are 2,199
-distinct `sequence` values among 28,972 rows, and these rows must not be
-deduplicated.
+**Row identity:** `pair_id` is the unique row key. `sequence` is not:
+variants from the same exon intentionally reuse the same reference assay
+construct. There are 2,199 distinct `sequence` values among 28,972 rows.
+Never deduplicate these rows by sequence.
 
 Neither output stores an arbitrary fixed genomic window. Any desired context
 can be extracted from `chrom`, 1-based `position`, `ref`, and `alt` using the
@@ -147,6 +147,10 @@ with:
 bash scripts/run_all.sh --full
 ```
 
+Compact processing removes any stale `mfass-full.parquet`; only `--full`
+produces all three supported processing outputs. Manifest refresh remains
+full-only.
+
 `run_all.sh` always invokes the named `mfass-processing` Mamba environment.
 `environment.yml` is the maintained solve;
 `environment-lock-linux-64.txt` plus `requirements-lock.txt` are the audited
@@ -170,9 +174,13 @@ python scripts/build_hf_release.py --output /path/to/mfass
 
 The release builder verifies the compact output, stages a fresh exact
 allowlist, and leaves only `README.md` and `mfass.parquet` (plus Git metadata)
-in the Hugging Face repository. It refuses a dirty processing repository and
-must be run after the parent processing commit. No manifest file is added to
-the Hugging Face repository.
+in the Hugging Face repository. It rejects the processing repository, all of
+its ancestors and descendants, and nonempty non-Git destinations. An existing
+Hugging Face Git target must be its clean worktree root and may contain only
+the two release files, `.git`, and optional `.gitattributes`; the attributes
+file is preserved byte-for-byte. The processing repository must have a clean
+committed HEAD, which is embedded in immutable processing and manifest links.
+No manifest file is added to the Hugging Face repository.
 
 ## Published baseline reproduction
 
@@ -193,6 +201,11 @@ https://doi.org/10.1016/j.molcel.2018.10.037
 
 ## License
 
-The processing code is MIT licensed. No license is asserted for the combined
-data artifacts (`NOASSERTION`); see [NOTICE.md](NOTICE.md) for authoritative
-upstream links and the unresolved MFASS redistribution question.
+The processing code is MIT licensed. Artifact-level status is `NOASSERTION`;
+the Hugging Face `license: other` metadata does not grant a new license. See
+[NOTICE.md](NOTICE.md) for authoritative upstream links.
+
+Permission for third-party redistribution of the processed MFASS measurements
+and derivatives in this repackaged form remains unresolved; obtain
+clarification or permission from the MFASS rights holders before
+redistribution.

@@ -514,6 +514,12 @@ def main() -> None:
     compact_path = args.output / "mfass.parquet"
     full_path = args.output / "mfass-full.parquet"
     metrics_path = args.output / "published_metrics.parquet"
+    if not args.full and (full_path.exists() or full_path.is_symlink()):
+        if full_path.is_dir() and not full_path.is_symlink():
+            raise RuntimeError(
+                f"refusing compact output with directory at {full_path}"
+            )
+        full_path.unlink()
     write_parquet(compact, compact_path)
     outputs = [compact_path]
     if args.full:
