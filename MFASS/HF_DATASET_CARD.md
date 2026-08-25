@@ -142,7 +142,7 @@ manifest, and processing code remain in the processing repository.
 
 ## Sources and citation
 
-Cheung, R. et al. A multiplexed assay for exon recognition reveals that an
+Rockie Chong et al. A multiplexed assay for exon recognition reveals that an
 unappreciated fraction of rare genetic variants cause large-effect splicing
 disruptions. *Molecular Cell* 73, 183-194.e8 (2019).
 https://doi.org/10.1016/j.molcel.2018.10.037

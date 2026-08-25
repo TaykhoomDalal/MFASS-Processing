@@ -2,16 +2,69 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import shutil
+import tempfile
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
 COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+@contextmanager
+def repository_lock(root: Path, exclusive: bool):
+    directory = root / ".locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / "processing.lock").open("a+b") as handle:
+        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(handle, operation)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextmanager
+def destination_lock(destination: Path):
+    destination = destination.expanduser().absolute()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    path = destination.parent / f".{destination.name}.mfass.lock"
+    with path.open("a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def unique_directory(parent: Path, prefix: str) -> Path:
+    return Path(tempfile.mkdtemp(dir=parent, prefix=prefix))
+
+
+@contextmanager
+def isolated_fasta(path: Path, **kwargs):
+    from pyfaidx import Fasta
+
+    directory = unique_directory(path.parent, f".{path.name}.index-")
+    genome = None
+    try:
+        genome = Fasta(
+            path,
+            indexname=str(directory / "index.fai"),
+            rebuild=True,
+            **kwargs,
+        )
+        yield genome
+    finally:
+        if genome is not None:
+            genome.close()
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def reverse_complement(sequence: str) -> str:
@@ -93,18 +146,26 @@ def replace_files_transactionally(
     replacements: Iterable[tuple[Path, Path]],
     backup_directory: Path,
     verify: Callable[[], None] | None = None,
+    removals: Iterable[Path] = (),
 ) -> None:
-    """Replace a set of files and restore every destination on failure."""
+    """Replace/remove files and restore every destination on failure."""
     items = list(replacements)
+    removal_items = list(removals)
+    destinations = [
+        destination for _source, destination in items
+    ] + removal_items
+    if len(destinations) != len(set(destinations)):
+        raise RuntimeError("transaction destinations must be unique")
     if backup_directory.exists() or backup_directory.is_symlink():
         raise RuntimeError(
             f"backup path already exists: {backup_directory}"
         )
     backup_directory.mkdir()
-    previous = []
-    for index, (source, destination) in enumerate(items):
+    for source, _destination in items:
         if not source.is_file() or source.is_symlink():
             raise RuntimeError(f"replacement must be a regular file: {source}")
+    previous = []
+    for index, destination in enumerate(destinations):
         existed = destination.exists() or destination.is_symlink()
         if existed and (
             not destination.is_file() or destination.is_symlink()
@@ -118,17 +179,22 @@ def replace_files_transactionally(
             shutil.copy2(destination, backup)
         previous.append((destination, backup, existed))
 
-    installed = 0
+    applied = []
     try:
-        for source, destination in items:
+        for index, (source, destination) in enumerate(items):
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
-            installed += 1
+            applied.append(previous[index])
+        for offset, destination in enumerate(
+            removal_items, start=len(items)
+        ):
+            destination.unlink(missing_ok=True)
+            applied.append(previous[offset])
         if verify is not None:
             verify()
     except BaseException as error:
         rollback_errors = []
-        for destination, backup, existed in reversed(previous[:installed]):
+        for destination, backup, existed in reversed(applied):
             try:
                 if existed:
                     os.replace(backup, destination)

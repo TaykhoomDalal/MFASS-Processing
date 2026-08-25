@@ -24,7 +24,9 @@ from MFASS.process import (
 )
 from scripts.common import (
     replace_files_transactionally,
+    repository_lock,
     sha256,
+    unique_directory,
     write_json,
 )
 from scripts.download_data import MANIFEST, load_manifest
@@ -227,7 +229,7 @@ def metric_membership(data_root: Path) -> dict:
     return membership
 
 
-def main() -> None:
+def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-root", type=Path, default=ROOT / "data")
     parser.add_argument("--output-root", type=Path, default=ROOT / "MFASS")
@@ -256,13 +258,13 @@ def main() -> None:
             f"output root must be a real directory: {output_root}"
         )
     output_root.parent.mkdir(parents=True, exist_ok=True)
-    staging = output_root.parent / (
-        f".{output_root.name}.manifest-staging-{os.getpid()}"
+    staging = unique_directory(
+        output_root.parent,
+        f".{output_root.name}.manifest-staging-",
     )
-    if staging.exists() or staging.is_symlink():
-        raise RuntimeError(f"staging path already exists: {staging}")
-    staging.mkdir()
     try:
+        environment = os.environ.copy()
+        environment["MFASS_PROCESSING_LOCK_HELD"] = "1"
         subprocess.run(
             [
                 sys.executable,
@@ -274,6 +276,7 @@ def main() -> None:
                 str(staging),
             ],
             check=True,
+            env=environment,
         )
         entries = {path.name for path in staging.iterdir()}
         if entries != set(OUTPUT_NAMES):
@@ -312,6 +315,7 @@ def main() -> None:
                 str(candidate),
             ],
             check=True,
+            env=environment,
         )
         replacements = [
             (staging / name, output_root / name)
@@ -354,6 +358,11 @@ def main() -> None:
     print(
         f"wrote fully verified combined manifest to {args.manifest}"
     )
+
+
+def main() -> None:
+    with repository_lock(ROOT, exclusive=True):
+        _main()
 
 
 if __name__ == "__main__":

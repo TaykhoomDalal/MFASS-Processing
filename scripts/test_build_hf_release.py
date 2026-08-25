@@ -5,6 +5,8 @@ import hashlib
 import os
 import shutil
 import subprocess
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -35,6 +37,47 @@ class CompactAuthorityTest(unittest.TestCase):
             expected,
             "processing compact output",
         )
+
+
+class CardReferenceTest(unittest.TestCase):
+    def test_every_processing_reference_must_be_main(self) -> None:
+        card = (
+            REPOSITORY / "MFASS/HF_DATASET_CARD.md"
+        ).read_text(encoding="utf-8")
+        invalid_refs = [
+            "deadbee",
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+            "v1.0.0",
+            "release",
+            "{{PROCESSING_COMMIT}}",
+        ]
+        for reference in invalid_refs:
+            with self.subTest(reference=reference):
+                url = (
+                    "https://github.com/TaykhoomDalal/"
+                    f"MFASS-Processing/blob/{reference}/README.md"
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError, "non-main processing references"
+                ):
+                    hf.validate_processing_urls(card + "\n" + url)
+
+    def test_abbreviated_commit_url_is_rejected(self) -> None:
+        card = (
+            REPOSITORY / "MFASS/HF_DATASET_CARD.md"
+        ).read_text(encoding="utf-8")
+        with self.assertRaisesRegex(
+            RuntimeError, "commit-specific processing URL"
+        ):
+            hf.validate_processing_urls(
+                card
+                + "\nhttps://github.com/TaykhoomDalal/"
+                "MFASS-Processing/commit/deadbee"
+            )
+
+    def test_current_card_uses_only_main(self) -> None:
+        card = hf.render_card()
+        self.assertIn("Rockie Chong et al.", card)
 
 
 class HuggingFaceReleaseRaceTest(unittest.TestCase):
@@ -244,6 +287,56 @@ class HuggingFaceReleaseRaceTest(unittest.TestCase):
                 hf.build_release(self.target, self.expected)
         self.assertTrue(corrupted)
         self.assert_target_unchanged()
+
+    def test_concurrent_writers_do_not_mix_or_clobber_release(self) -> None:
+        output = self.scratch / "concurrent-target"
+        original_copy = hf.copy_verified_compact
+        active = 0
+        maximum_active = 0
+        active_lock = threading.Lock()
+        errors = []
+
+        def slow_copy(*args, **kwargs):
+            nonlocal active, maximum_active
+            with active_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            try:
+                time.sleep(0.1)
+                return original_copy(*args, **kwargs)
+            finally:
+                with active_lock:
+                    active -= 1
+
+        def build() -> None:
+            try:
+                hf.build_release(output, self.expected)
+            except RuntimeError as error:
+                errors.append(error)
+
+        with (
+            mock.patch.object(hf, "ROOT", self.processing),
+            mock.patch.object(
+                hf, "copy_verified_compact", side_effect=slow_copy
+            ),
+        ):
+            threads = [threading.Thread(target=build) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+                self.assertFalse(thread.is_alive(), "release writer hung")
+
+        self.assertEqual(maximum_active, 1)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(
+            (output / "mfass.parquet").read_bytes(),
+            self.source.read_bytes(),
+        )
+        self.assertEqual(
+            (output / "README.md").read_bytes(),
+            (self.processing / "MFASS/HF_DATASET_CARD.md").read_bytes(),
+        )
 
 
 if __name__ == "__main__":

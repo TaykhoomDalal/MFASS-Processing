@@ -85,6 +85,11 @@ if $full; then
   verify_args+=(--full)
 fi
 
+mkdir -p "$root/.locks"
+exec 9>"$root/.locks/processing.lock"
+flock -x 9
+export MFASS_PROCESSING_LOCK_HELD=1
+
 mamba run --name "$environment" \
   python "$root/scripts/download_data.py" "${download_args[@]}"
 mamba run --name "$environment" \

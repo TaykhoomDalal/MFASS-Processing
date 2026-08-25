@@ -29,7 +29,7 @@ declaration:
 - <https://github.com/KosuriLab/MFASS/tree/3b1b2bdaea828283508ba22cdd8d0c431ea70dea>
 - GEO GSE120695:
   <https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE120695>
-- Cheung et al. (2019):
+- Rockie Chong et al. (2019):
   <https://doi.org/10.1016/j.molcel.2018.10.037>
 
 Public availability and required citation do not by themselves establish a

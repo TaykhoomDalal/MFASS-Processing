@@ -14,7 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.common import replace_files_transactionally
+from scripts.common import (
+    destination_lock,
+    replace_files_transactionally,
+    repository_lock,
+    unique_directory,
+)
 
 RELEASE_FILES = {"README.md", "mfass.parquet"}
 GIT_METADATA = {".git", ".gitattributes"}
@@ -36,6 +41,16 @@ COMMIT_SPECIFIC_PROCESSING_URL = re.compile(
     r"|raw\.githubusercontent\.com/TaykhoomDalal/"
     r"MFASS-Processing/"
     r")[0-9a-f]{40}(?:/|\b)"
+)
+PROCESSING_REFERENCE_URL = re.compile(
+    r"https?://(?:"
+    r"github\.com/TaykhoomDalal/MFASS-Processing/(?:tree|blob)"
+    r"|raw\.githubusercontent\.com/TaykhoomDalal/MFASS-Processing"
+    r")/(?P<ref>[^/\s?#)\]>'\"]*)"
+)
+PROCESSING_COMMIT_URL = re.compile(
+    r"https?://github\.com/TaykhoomDalal/MFASS-Processing/commit/"
+    r"[^/\s?#)\]>'\"]+"
 )
 
 
@@ -297,6 +312,25 @@ def load_compact_output_authority() -> dict:
     return expected
 
 
+def validate_processing_urls(rendered: str) -> None:
+    invalid_refs = sorted({
+        match.group("ref")
+        for match in PROCESSING_REFERENCE_URL.finditer(rendered)
+        if match.group("ref") != "main"
+    })
+    if invalid_refs:
+        raise RuntimeError(
+            "dataset card contains non-main processing references: "
+            f"{invalid_refs}"
+        )
+    commit_url = PROCESSING_COMMIT_URL.search(rendered)
+    if commit_url:
+        raise RuntimeError(
+            "dataset card contains a commit-specific processing URL: "
+            f"{commit_url.group(0)}"
+        )
+
+
 def render_card() -> str:
     rendered = (ROOT / "MFASS/HF_DATASET_CARD.md").read_text(
         encoding="utf-8"
@@ -310,12 +344,7 @@ def render_card() -> str:
             "dataset card contains legacy commit-specific placeholders: "
             f"{sorted(remaining)}"
         )
-    commit_url = COMMIT_SPECIFIC_PROCESSING_URL.search(rendered)
-    if commit_url:
-        raise RuntimeError(
-            "dataset card contains a commit-specific processing URL: "
-            f"{commit_url.group(0)}"
-        )
+    validate_processing_urls(rendered)
     if "Processing commit:" in rendered or "Root manifest SHA-256:" in rendered:
         raise RuntimeError(
             "dataset card contains commit-specific processing provenance"
@@ -332,7 +361,7 @@ def render_card() -> str:
     return rendered
 
 
-def build_release(output: Path, expected_compact: dict) -> None:
+def _build_release(output: Path, expected_compact: dict) -> None:
     requested_output = output.expanduser().absolute()
     if requested_output.is_symlink():
         raise RuntimeError(f"release output must be a real directory: {output}")
@@ -342,12 +371,10 @@ def build_release(output: Path, expected_compact: dict) -> None:
     metadata, attributes = inspect_destination(output)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    staging = output.parent / (
-        f".{output.name}.mfass-staging-{os.getpid()}"
+    staging = unique_directory(
+        output.parent,
+        f".{output.name}.mfass-staging-",
     )
-    if staging.exists() or staging.is_symlink():
-        raise RuntimeError(f"staging path already exists: {staging}")
-    staging.mkdir()
     try:
         copy_verified_compact(
             ROOT / COMPACT_OUTPUT_PATH,
@@ -417,17 +444,31 @@ def build_release(output: Path, expected_compact: dict) -> None:
     print(f"built exact compact Hugging Face release under {output}")
 
 
+def build_release(
+    output: Path, expected_compact: dict | None = None
+) -> None:
+    requested_output = output.expanduser().absolute()
+    reject_processing_overlap(requested_output)
+    with repository_lock(ROOT, exclusive=False):
+        if expected_compact is None:
+            require_clean_processing_tree()
+            expected_compact = load_compact_output_authority()
+            environment = os.environ.copy()
+            environment["MFASS_PROCESSING_LOCK_HELD"] = "1"
+            subprocess.run(
+                [sys.executable, str(ROOT / "scripts/verify_outputs.py")],
+                check=True,
+                env=environment,
+            )
+        with destination_lock(requested_output):
+            _build_release(requested_output, expected_compact)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    require_clean_processing_tree()
-    expected_compact = load_compact_output_authority()
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts/verify_outputs.py")],
-        check=True,
-    )
-    build_release(args.output, expected_compact)
+    build_release(args.output)
 
 
 if __name__ == "__main__":

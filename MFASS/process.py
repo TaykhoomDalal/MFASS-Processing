@@ -4,25 +4,31 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from pyfaidx import Fasta
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.common import (
     COMPLEMENT,
     align_sequences,
+    isolated_fasta,
+    replace_files_transactionally,
+    repository_lock,
     reverse_complement,
     sha256,
+    unique_directory,
     write_parquet,
 )
 from scripts.download_data import materialized_sources
 
 
+ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_ROWS = 28_972
 EXPECTED_EVALUABLE = 27_733
 EXPECTED_POSITIVES = 1_050
@@ -147,7 +153,7 @@ def infer_exon_orientation(
 
 def validate_regions(
     frame: pd.DataFrame,
-    genome: Fasta,
+    genome,
     orientation: dict[str, str],
 ) -> dict[str, dict]:
     validations = {}
@@ -234,13 +240,17 @@ def load_inputs(data_root: Path) -> pd.DataFrame:
 def build_frames(
     frame: pd.DataFrame, fasta: Path
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    genome = Fasta(fasta, one_based_attributes=False, rebuild=True)
-    reference_bases = [
-        str(genome[row.chr][int(row.snp_position_hg38_1based) - 1]).upper()
-        for row in frame.itertuples(index=False)
-    ]
-    orientation = infer_exon_orientation(frame, reference_bases)
-    region_validations = validate_regions(frame, genome, orientation)
+    with isolated_fasta(fasta, one_based_attributes=False) as genome:
+        reference_bases = [
+            str(
+                genome[row.chr][
+                    int(row.snp_position_hg38_1based) - 1
+                ]
+            ).upper()
+            for row in frame.itertuples(index=False)
+        ]
+        orientation = infer_exon_orientation(frame, reference_bases)
+        region_validations = validate_regions(frame, genome, orientation)
 
     compact_rows = []
     audit_rows = []
@@ -481,11 +491,55 @@ def published_metrics(frame: pd.DataFrame) -> pd.DataFrame:
     return metrics
 
 
-def main() -> None:
-    root = Path(__file__).resolve().parents[1]
+def publish_outputs(
+    staging: Path,
+    output: Path,
+    output_names: list[str],
+    remove_full: bool,
+) -> None:
+    expected = {
+        name: {
+            "bytes": (staging / name).stat().st_size,
+            "sha256": sha256(staging / name),
+        }
+        for name in output_names
+    }
+    full_path = output / "mfass-full.parquet"
+
+    def verify_install() -> None:
+        for name, record in expected.items():
+            path = output / name
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or path.stat().st_size != record["bytes"]
+                or sha256(path) != record["sha256"]
+            ):
+                raise RuntimeError(
+                    f"installed output differs from staging: {path}"
+                )
+        if remove_full and (
+            full_path.exists() or full_path.is_symlink()
+        ):
+            raise RuntimeError(
+                f"stale full output was not removed: {full_path}"
+            )
+
+    replace_files_transactionally(
+        [
+            (staging / name, output / name)
+            for name in output_names
+        ],
+        staging / ".rollback",
+        verify_install,
+        removals=[full_path] if remove_full else [],
+    )
+
+
+def _main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=root / "data")
-    parser.add_argument("--output", type=Path, default=root / "MFASS")
+    parser.add_argument("--data-root", type=Path, default=ROOT / "data")
+    parser.add_argument("--output", type=Path, default=ROOT / "MFASS")
     parser.add_argument(
         "--full",
         action="store_true",
@@ -511,24 +565,45 @@ def main() -> None:
     ):
         raise RuntimeError("unexpected final MFASS counts")
 
-    compact_path = args.output / "mfass.parquet"
-    full_path = args.output / "mfass-full.parquet"
-    metrics_path = args.output / "published_metrics.parquet"
-    if not args.full and (full_path.exists() or full_path.is_symlink()):
-        if full_path.is_dir() and not full_path.is_symlink():
-            raise RuntimeError(
-                f"refusing compact output with directory at {full_path}"
-            )
-        full_path.unlink()
-    write_parquet(compact, compact_path)
-    outputs = [compact_path]
+    output = args.output.expanduser().absolute()
+    if output.is_symlink() or (
+        output.exists() and not output.is_dir()
+    ):
+        raise RuntimeError(f"output must be a real directory: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = unique_directory(
+        output.parent, f".{output.name}.process-staging-"
+    )
+    output_names = ["mfass.parquet", "published_metrics.parquet"]
     if args.full:
-        write_parquet(full, full_path)
-        outputs.append(full_path)
-    write_parquet(metrics, metrics_path)
-    outputs.append(metrics_path)
-    names = ", ".join(path.name for path in outputs)
+        output_names.insert(1, "mfass-full.parquet")
+    try:
+        write_parquet(compact, staging / "mfass.parquet")
+        if args.full:
+            write_parquet(full, staging / "mfass-full.parquet")
+        write_parquet(metrics, staging / "published_metrics.parquet")
+        publish_outputs(
+            staging,
+            output,
+            output_names,
+            remove_full=not args.full,
+        )
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    names = ", ".join(output_names)
     print(f"wrote {len(compact):,} rows to {names}")
+
+
+def run(lock_held: bool = False) -> None:
+    if lock_held:
+        _main()
+        return
+    with repository_lock(ROOT, exclusive=True):
+        _main()
+
+
+def main() -> None:
+    run(os.environ.get("MFASS_PROCESSING_LOCK_HELD") == "1")
 
 
 if __name__ == "__main__":

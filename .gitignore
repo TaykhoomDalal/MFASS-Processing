@@ -6,3 +6,6 @@ __pycache__/
 data/
 MFASS/*.parquet
 release/
+.locks/
+/.MFASS.manifest-staging-*/
+/.MFASS.process-staging-*/

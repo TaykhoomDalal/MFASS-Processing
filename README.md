@@ -111,7 +111,8 @@ Baseline scores are pinned to `brhanufen/spliceconsensus` commit
 The reference is NCBI's complete GRCh38 no-alt analysis set
 `GCA_000001405.15`, using UCSC chromosome names. Every download is checked by
 content hash and byte size; the compressed NCBI FASTA is also checked against
-NCBI's published MD5.
+NCBI's published MD5. Producer and verifier each rebuild a private temporary
+FASTA index from that hashed file and never read an adjacent `.fai`.
 
 [`manifest.json`](manifest.json) pins the source files and expected generated
 outputs used by the downloader and verifier. Generated files under `data/`
@@ -119,13 +120,15 @@ and `MFASS/` remain ignored. After an intentional reviewed output change,
 refresh the full candidate build and recorded hashes with:
 
 ```bash
-python scripts/build_manifest.py --full
+mamba run --name mfass-processing python scripts/build_manifest.py --full
 ```
 
 The manifest builder creates all three outputs in fresh staging, records only
 those candidate artifacts, verifies the complete candidate, and then replaces
 the outputs and manifest as one rollback-safe transaction. Existing Parquets
-are never used as manifest evidence.
+are never used as manifest evidence. An exclusive repository lock covers the
+candidate build, validation, and replacement; verifiers take the matching
+shared lock, so cooperating readers cannot observe mixed generations.
 
 Network acquisition uses three bounded attempts, a 120-second socket timeout,
 and bounded backoff. Downloads are checked by expected bytes and digest;
@@ -152,9 +155,15 @@ bash scripts/run_all.sh --full
 
 Compact processing removes any stale `mfass-full.parquet`; only `--full`
 produces all three supported processing outputs. Manifest refresh remains
-full-only.
+full-only. Compact/metrics replacement and stale-full removal are one rollback
+transaction, so any installation or deletion failure restores all three prior
+destinations.
 
 `run_all.sh` always invokes the named `mfass-processing` Mamba environment.
+It holds the repository generation lock across download validation, fresh
+staging, transactional output publication, and verification. A standalone
+`MFASS/process.py` invocation takes the same lock, so concurrent runs cannot
+share temporary files or expose mixed output generations to the verifier.
 `environment.yml` is the maintained solve;
 `environment-lock-linux-64.txt` plus `requirements-lock.txt` are the audited
 Linux lock (the separate requirements lock exists because pyfaidx is installed
@@ -172,7 +181,8 @@ bash scripts/run_all.sh --full \
 Build the compact Hugging Face release:
 
 ```bash
-python scripts/build_hf_release.py --output /path/to/mfass
+mamba run --name mfass-processing python scripts/build_hf_release.py \
+  --output /path/to/mfass
 ```
 
 The release builder loads the compact byte size and SHA-256 from the committed
@@ -188,12 +198,14 @@ plus Parquet updates roll back together on failure. The processing repository
 must have a clean committed HEAD so the release is built from a reviewed,
 verified tree. The card uses stable `main` repository and documentation links
 rather than commit hashes or commit-specific URLs. No manifest file is added
-to the Hugging Face repository.
+to the Hugging Face repository. A shared processing-generation lock and an
+exclusive destination lock serialize release readers and writers.
 
 Run the release race and rollback regressions with:
 
 ```bash
-python -m unittest scripts.test_build_hf_release
+mamba run --name mfass-processing python -m unittest \
+  scripts.test_build_hf_release scripts.test_fasta_index scripts.test_locking
 ```
 
 ## Published baseline reproduction
@@ -208,7 +220,7 @@ python -m unittest scripts.test_build_hf_release
 
 ## Citation
 
-Cheung, R. et al. *A multiplexed assay for exon recognition reveals that an
+Rockie Chong et al. *A multiplexed assay for exon recognition reveals that an
 unappreciated fraction of rare genetic variants cause large-effect splicing
 disruptions*. Molecular Cell 73, 183-194.e8 (2019).
 https://doi.org/10.1016/j.molcel.2018.10.037

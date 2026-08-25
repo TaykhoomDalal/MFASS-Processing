@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,12 +12,11 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pyfaidx import Fasta
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.common import sha256
+from scripts.common import isolated_fasta, repository_lock, sha256
 
 
 EXPECTED_ROWS = 28_972
@@ -551,7 +551,7 @@ def classify_region_alignment(
 
 def build_region_oracle(
     source: pd.DataFrame,
-    genome: Fasta,
+    genome,
     identity_orientation: dict[str, bool],
 ) -> dict[str, dict]:
     validations = {}
@@ -714,12 +714,10 @@ def build_output_oracles(
         data_root
         / golden["sources"]["grch38_no_alt_reference"]["local_path"]
     )
-    genome = Fasta(
+    with isolated_fasta(
         fasta_path,
         one_based_attributes=False,
-        rebuild=False,
-    )
-    try:
+    ) as genome:
         reference_bases = pd.Series(
             [
                 str(
@@ -751,8 +749,6 @@ def build_output_oracles(
         region_validations = build_region_oracle(
             source, genome, identity_orientation
         )
-    finally:
-        genome.close()
 
     source_oracle, _labels, _scores = load_published_oracle(
         data_root, golden, source
@@ -1146,7 +1142,7 @@ def independent_membership_checks(
             )
 
 
-def main() -> None:
+def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--full",
@@ -1261,6 +1257,14 @@ def main() -> None:
         "28,972 pair_id rows, repeated assay references, and five "
         "independently masked published baselines with pinned provenance"
     )
+
+
+def main() -> None:
+    if os.environ.get("MFASS_PROCESSING_LOCK_HELD") == "1":
+        _main()
+        return
+    with repository_lock(ROOT, exclusive=False):
+        _main()
 
 
 if __name__ == "__main__":
