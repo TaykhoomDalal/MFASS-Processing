@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 
 COMPLEMENT = str.maketrans("ACGTNacgtn", "TGCANtgcan")
@@ -86,3 +87,60 @@ def write_parquet(frame, path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     frame.to_parquet(temporary, index=False, compression="zstd")
     os.replace(temporary, path)
+
+
+def replace_files_transactionally(
+    replacements: Iterable[tuple[Path, Path]],
+    backup_directory: Path,
+    verify: Callable[[], None] | None = None,
+) -> None:
+    """Replace a set of files and restore every destination on failure."""
+    items = list(replacements)
+    if backup_directory.exists() or backup_directory.is_symlink():
+        raise RuntimeError(
+            f"backup path already exists: {backup_directory}"
+        )
+    backup_directory.mkdir()
+    previous = []
+    for index, (source, destination) in enumerate(items):
+        if not source.is_file() or source.is_symlink():
+            raise RuntimeError(f"replacement must be a regular file: {source}")
+        existed = destination.exists() or destination.is_symlink()
+        if existed and (
+            not destination.is_file() or destination.is_symlink()
+        ):
+            raise RuntimeError(
+                f"replacement destination must be a regular file: "
+                f"{destination}"
+            )
+        backup = backup_directory / f"{index}-{destination.name}"
+        if existed:
+            shutil.copy2(destination, backup)
+        previous.append((destination, backup, existed))
+
+    installed = 0
+    try:
+        for source, destination in items:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
+            installed += 1
+        if verify is not None:
+            verify()
+    except BaseException as error:
+        rollback_errors = []
+        for destination, backup, existed in reversed(previous[:installed]):
+            try:
+                if existed:
+                    os.replace(backup, destination)
+                else:
+                    destination.unlink(missing_ok=True)
+            except OSError as rollback_error:
+                rollback_errors.append(
+                    f"{destination}: {rollback_error}"
+                )
+        if rollback_errors:
+            raise RuntimeError(
+                "replacement failed and rollback was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from error
+        raise

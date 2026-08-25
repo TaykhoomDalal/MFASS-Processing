@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,17 +13,86 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.common import replace_files_transactionally
+
 RELEASE_FILES = {"README.md", "mfass.parquet"}
 GIT_METADATA = {".git", ".gitattributes"}
-COMMIT_TOKEN = "{{PROCESSING_COMMIT}}"
-MANIFEST_HASH_TOKEN = "{{PROCESSING_MANIFEST_SHA256}}"
+COMPACT_OUTPUT_PATH = "MFASS/mfass.parquet"
+LEGACY_PROVENANCE_TOKENS = {
+    "{{PROCESSING_COMMIT}}",
+    "{{PROCESSING_MANIFEST_SHA256}}",
+}
+STABLE_CARD_LINKS = {
+    "https://github.com/TaykhoomDalal/MFASS-Processing/tree/main",
+    "https://github.com/TaykhoomDalal/MFASS-Processing/blob/main/README.md",
+    "https://github.com/TaykhoomDalal/MFASS-Processing/blob/main/manifest.json",
+    "https://github.com/TaykhoomDalal/MFASS-Processing/blob/main/NOTICE.md",
+}
+COMMIT_SPECIFIC_PROCESSING_URL = re.compile(
+    r"https://(?:"
+    r"github\.com/TaykhoomDalal/MFASS-Processing/"
+    r"(?:commit|blob|tree)/"
+    r"|raw\.githubusercontent\.com/TaykhoomDalal/"
+    r"MFASS-Processing/"
+    r")[0-9a-f]{40}(?:/|\b)"
+)
 
 
-def copy(source: Path, target: Path) -> None:
+def verify_compact_artifact(
+    path: Path, expected: dict, context: str
+) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"{context} must be a regular file: {path}")
+    if path.stat().st_size != expected["bytes"]:
+        raise RuntimeError(
+            f"{context} byte size changed: expected {expected['bytes']}, "
+            f"got {path.stat().st_size}"
+        )
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    observed = digest.hexdigest()
+    if observed != expected["sha256"]:
+        raise RuntimeError(
+            f"{context} sha256 changed: expected {expected['sha256']}, "
+            f"got {observed}"
+        )
+
+
+def copy_verified_compact(
+    source: Path, target: Path, expected: dict
+) -> None:
+    verify_compact_artifact(
+        source, expected, "processing compact output"
+    )
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
-    shutil.copyfile(source, temporary)
-    temporary.replace(target)
+    digest = hashlib.sha256()
+    copied = 0
+    try:
+        with source.open("rb") as source_handle:
+            with temporary.open("wb") as target_handle:
+                for block in iter(
+                    lambda: source_handle.read(1 << 20), b""
+                ):
+                    target_handle.write(block)
+                    digest.update(block)
+                    copied += len(block)
+        if (
+            copied != expected["bytes"]
+            or digest.hexdigest() != expected["sha256"]
+        ):
+            raise RuntimeError(
+                "processing compact output changed while being copied"
+            )
+        temporary.replace(target)
+        verify_compact_artifact(
+            target, expected, "staged compact output"
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def write_text(text: str, target: Path) -> None:
@@ -168,7 +239,7 @@ def inspect_destination(output: Path) -> tuple[set[str], bytes | None]:
     return metadata, attributes
 
 
-def processing_provenance() -> tuple[str, str]:
+def require_clean_processing_tree() -> None:
     status = subprocess.check_output(
         [
             "git",
@@ -184,6 +255,9 @@ def processing_provenance() -> tuple[str, str]:
         raise RuntimeError(
             "commit all processing changes before building the HF release"
         )
+
+
+def load_compact_output_authority() -> dict:
     revision = subprocess.check_output(
         ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
         text=True,
@@ -193,31 +267,78 @@ def processing_provenance() -> tuple[str, str]:
     )
     working_manifest = (ROOT / "manifest.json").read_bytes()
     if working_manifest != committed_manifest:
-        raise RuntimeError("working manifest differs from the processing commit")
-    digest = hashlib.sha256(committed_manifest).hexdigest()
-    return revision, digest
+        raise RuntimeError(
+            "working manifest differs from the processing commit"
+        )
+    manifest = json.loads(committed_manifest)
+    try:
+        record = manifest["outputs"][COMPACT_OUTPUT_PATH]
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(
+            f"committed manifest has no {COMPACT_OUTPUT_PATH} authority"
+        ) from error
+    expected = {
+        "bytes": record.get("bytes"),
+        "sha256": record.get("sha256"),
+    }
+    if (
+        not isinstance(expected["bytes"], int)
+        or expected["bytes"] < 0
+        or not isinstance(expected["sha256"], str)
+        or len(expected["sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected["sha256"]
+        )
+    ):
+        raise RuntimeError(
+            "committed manifest has invalid compact output authority"
+        )
+    return expected
 
 
-def render_card(revision: str, manifest_hash: str) -> str:
-    template = (ROOT / "MFASS/HF_DATASET_CARD.md").read_text(
+def render_card() -> str:
+    rendered = (ROOT / "MFASS/HF_DATASET_CARD.md").read_text(
         encoding="utf-8"
     )
-    rendered = template.replace(COMMIT_TOKEN, revision).replace(
-        MANIFEST_HASH_TOKEN, manifest_hash
-    )
-    if COMMIT_TOKEN in rendered or MANIFEST_HASH_TOKEN in rendered:
-        raise RuntimeError("dataset card provenance placeholders remain")
+    remaining = {
+        token for token in LEGACY_PROVENANCE_TOKENS
+        if token in rendered
+    }
+    if remaining:
+        raise RuntimeError(
+            "dataset card contains legacy commit-specific placeholders: "
+            f"{sorted(remaining)}"
+        )
+    commit_url = COMMIT_SPECIFIC_PROCESSING_URL.search(rendered)
+    if commit_url:
+        raise RuntimeError(
+            "dataset card contains a commit-specific processing URL: "
+            f"{commit_url.group(0)}"
+        )
+    if "Processing commit:" in rendered or "Root manifest SHA-256:" in rendered:
+        raise RuntimeError(
+            "dataset card contains commit-specific processing provenance"
+        )
+    missing_links = {
+        link for link in STABLE_CARD_LINKS
+        if link not in rendered
+    }
+    if missing_links:
+        raise RuntimeError(
+            "dataset card is missing stable processing links: "
+            f"{sorted(missing_links)}"
+        )
     return rendered
 
 
-def build_release(
-    output: Path, revision: str, manifest_hash: str
-) -> None:
+def build_release(output: Path, expected_compact: dict) -> None:
     requested_output = output.expanduser().absolute()
     if requested_output.is_symlink():
         raise RuntimeError(f"release output must be a real directory: {output}")
     output = requested_output.resolve()
     reject_processing_overlap(output)
+    output_existed = output.exists()
     metadata, attributes = inspect_destination(output)
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -228,26 +349,66 @@ def build_release(
         raise RuntimeError(f"staging path already exists: {staging}")
     staging.mkdir()
     try:
-        copy(ROOT / "MFASS/mfass.parquet", staging / "mfass.parquet")
+        copy_verified_compact(
+            ROOT / COMPACT_OUTPUT_PATH,
+            staging / "mfass.parquet",
+            expected_compact,
+        )
         write_text(
-            render_card(revision, manifest_hash),
+            render_card(),
             staging / "README.md",
         )
         require_release_allowlist(staging, set())
+        verify_compact_artifact(
+            staging / "mfass.parquet",
+            expected_compact,
+            "staged compact output",
+        )
+
+        def verify_update() -> None:
+            require_release_allowlist(output, metadata)
+            verify_compact_artifact(
+                output / "mfass.parquet",
+                expected_compact,
+                "installed compact output",
+            )
+            if attributes is not None and (
+                output / ".gitattributes"
+            ).read_bytes() != attributes:
+                raise RuntimeError(
+                    ".gitattributes changed during release build"
+                )
 
         if ".git" in metadata:
-            for name in sorted(RELEASE_FILES):
-                os.replace(staging / name, output / name)
-            staging.rmdir()
+            replace_files_transactionally(
+                [
+                    (staging / name, output / name)
+                    for name in sorted(RELEASE_FILES)
+                ],
+                staging / ".rollback",
+                verify_update,
+            )
         else:
-            if output.exists():
-                output.rmdir()
-            os.replace(staging, output)
-        require_release_allowlist(output, metadata)
-        if attributes is not None and (
-            output / ".gitattributes"
-        ).read_bytes() != attributes:
-            raise RuntimeError(".gitattributes changed during release build")
+            if not output_existed:
+                output.mkdir()
+            try:
+                replace_files_transactionally(
+                    [
+                        (staging / name, output / name)
+                        for name in sorted(RELEASE_FILES)
+                    ],
+                    staging / ".rollback",
+                    verify_update,
+                )
+            except BaseException:
+                if (
+                    not output_existed
+                    and output.is_dir()
+                    and not output.is_symlink()
+                    and not any(output.iterdir())
+                ):
+                    output.rmdir()
+                raise
     finally:
         if staging.is_symlink():
             staging.unlink()
@@ -260,12 +421,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    revision, manifest_hash = processing_provenance()
+    require_clean_processing_tree()
+    expected_compact = load_compact_output_authority()
     subprocess.run(
         [sys.executable, str(ROOT / "scripts/verify_outputs.py")],
         check=True,
     )
-    build_release(args.output, revision, manifest_hash)
+    build_release(args.output, expected_compact)
 
 
 if __name__ == "__main__":

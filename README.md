@@ -116,14 +116,16 @@ NCBI's published MD5.
 [`manifest.json`](manifest.json) pins the source files and expected generated
 outputs used by the downloader and verifier. Generated files under `data/`
 and `MFASS/` remain ignored. After an intentional reviewed output change,
-first run a full build, then refresh the recorded hashes with:
+refresh the full candidate build and recorded hashes with:
 
 ```bash
 python scripts/build_manifest.py --full
 ```
 
-The manifest builder requires a verified full build, so an old
-`mfass-full.parquet` cannot be registered accidentally.
+The manifest builder creates all three outputs in fresh staging, records only
+those candidate artifacts, verifies the complete candidate, and then replaces
+the outputs and manifest as one rollback-safe transaction. Existing Parquets
+are never used as manifest evidence.
 
 Network acquisition uses three bounded attempts, a 120-second socket timeout,
 and bounded backoff. Downloads are checked by expected bytes and digest;
@@ -131,7 +133,8 @@ reused local files receive the same materialized checks. The compressed NCBI
 FASTA is checked by its published MD5 before decompression and by SHA-256
 afterward. Downloads, symlinks, Parquets, JSON, and the exact two-file Hugging
 Face release are staged before replacement so incomplete files do not become
-published artifacts.
+published artifacts. Multi-file manifest and existing-Git release updates
+restore every prior destination if any replacement or final check fails.
 
 ## Build
 
@@ -172,15 +175,26 @@ Build the compact Hugging Face release:
 python scripts/build_hf_release.py --output /path/to/mfass
 ```
 
-The release builder verifies the compact output, stages a fresh exact
-allowlist, and leaves only `README.md` and `mfass.parquet` (plus Git metadata)
+The release builder loads the compact byte size and SHA-256 from the committed
+root manifest, verifies the processing artifact while copying, rechecks fresh
+staging, and checks the installed Parquet inside the rollback-protected
+transaction. It leaves only `README.md` and `mfass.parquet` (plus Git metadata)
 in the Hugging Face repository. It rejects the processing repository, all of
 its ancestors and descendants, and nonempty non-Git destinations. An existing
 Hugging Face Git target must be its clean worktree root and may contain only
 the two release files, `.git`, and optional `.gitattributes`; the attributes
-file is preserved byte-for-byte. The processing repository must have a clean
-committed HEAD, which is embedded in immutable processing and manifest links.
-No manifest file is added to the Hugging Face repository.
+file is preserved byte-for-byte, Git metadata is left in place, and README
+plus Parquet updates roll back together on failure. The processing repository
+must have a clean committed HEAD so the release is built from a reviewed,
+verified tree. The card uses stable `main` repository and documentation links
+rather than commit hashes or commit-specific URLs. No manifest file is added
+to the Hugging Face repository.
+
+Run the release race and rollback regressions with:
+
+```bash
+python -m unittest scripts.test_build_hf_release
+```
 
 ## Published baseline reproduction
 

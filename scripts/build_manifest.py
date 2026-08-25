@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,11 @@ from MFASS.process import (
     EXPECTED_ROWS,
     validate_inputs,
 )
-from scripts.common import sha256, write_json
+from scripts.common import (
+    replace_files_transactionally,
+    sha256,
+    write_json,
+)
 from scripts.download_data import MANIFEST, load_manifest
 
 
@@ -241,27 +246,59 @@ def main() -> None:
             "unverified mfass-full.parquet"
         )
 
-    current = load_manifest()
+    current = load_manifest(args.manifest)
     validate_inputs(args.data_root)
-    outputs = {}
-    for name in OUTPUT_NAMES:
-        path = args.output_root / name
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        outputs[f"MFASS/{name}"] = describe(path)
-    contract = processing_contract()
-    contract["evaluation"]["membership"] = metric_membership(args.data_root)
-    payload = {
-        "manifest_version": 1,
-        "sources": current["sources"],
-        "outputs": outputs,
-        "contracts": {
-            "mfass": contract,
-        },
-    }
-    candidate = args.manifest.with_suffix(args.manifest.suffix + ".candidate")
-    write_json(candidate, payload)
+    output_root = args.output_root.expanduser().absolute()
+    if output_root.is_symlink() or (
+        output_root.exists() and not output_root.is_dir()
+    ):
+        raise RuntimeError(
+            f"output root must be a real directory: {output_root}"
+        )
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    staging = output_root.parent / (
+        f".{output_root.name}.manifest-staging-{os.getpid()}"
+    )
+    if staging.exists() or staging.is_symlink():
+        raise RuntimeError(f"staging path already exists: {staging}")
+    staging.mkdir()
     try:
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "MFASS/process.py"),
+                "--full",
+                "--data-root",
+                str(args.data_root),
+                "--output",
+                str(staging),
+            ],
+            check=True,
+        )
+        entries = {path.name for path in staging.iterdir()}
+        if entries != set(OUTPUT_NAMES):
+            raise RuntimeError(
+                f"fresh build produced unexpected artifacts: "
+                f"{sorted(entries)}"
+            )
+        outputs = {
+            f"MFASS/{name}": describe(staging / name)
+            for name in OUTPUT_NAMES
+        }
+        contract = processing_contract()
+        contract["evaluation"]["membership"] = metric_membership(
+            args.data_root
+        )
+        payload = {
+            "manifest_version": 1,
+            "sources": current["sources"],
+            "outputs": outputs,
+            "contracts": {
+                "mfass": contract,
+            },
+        }
+        candidate = staging / "manifest.json.candidate"
+        write_json(candidate, payload)
         subprocess.run(
             [
                 sys.executable,
@@ -270,15 +307,50 @@ def main() -> None:
                 "--data-root",
                 str(args.data_root),
                 "--output",
-                str(args.output_root),
+                str(staging),
                 "--manifest",
                 str(candidate),
             ],
             check=True,
         )
-        os.replace(candidate, args.manifest)
+        replacements = [
+            (staging / name, output_root / name)
+            for name in OUTPUT_NAMES
+        ]
+        candidate_bytes = candidate.read_bytes()
+        replacements.append((candidate, args.manifest))
+
+        def verify_install() -> None:
+            for name in OUTPUT_NAMES:
+                path = output_root / name
+                expected = outputs[f"MFASS/{name}"]
+                if (
+                    not path.is_file()
+                    or path.is_symlink()
+                    or describe(path) != expected
+                ):
+                    raise RuntimeError(
+                        f"installed output differs from candidate: {path}"
+                    )
+            if (
+                not args.manifest.is_file()
+                or args.manifest.is_symlink()
+                or args.manifest.read_bytes() != candidate_bytes
+            ):
+                raise RuntimeError(
+                    "installed manifest differs from verified candidate"
+                )
+
+        replace_files_transactionally(
+            replacements,
+            staging / ".rollback",
+            verify_install,
+        )
     finally:
-        candidate.unlink(missing_ok=True)
+        if staging.is_symlink():
+            staging.unlink()
+        elif staging.exists():
+            shutil.rmtree(staging)
     print(
         f"wrote fully verified combined manifest to {args.manifest}"
     )

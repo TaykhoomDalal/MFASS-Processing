@@ -38,6 +38,19 @@ SCORE_FILES = {
     ),
     "mmsplice": ("scores_mmsplice.csv", "mmsplice_score"),
 }
+SCORE_SOURCE_NAMES = {
+    "pangolin": "pangolin_scores",
+    "spliceai": "spliceai_scores",
+    "splicetransformer": "splicetransformer_scores",
+    "mmsplice": "mmsplice_scores",
+}
+PUBLISHED_SOURCE_NAMES = (
+    "mfass_labels",
+    "pangolin_scores",
+    "spliceai_scores",
+    "splicetransformer_scores",
+    "mmsplice_scores",
+)
 EXPECTED_COMPACT_COLUMNS = [
     "split",
     "source_index",
@@ -68,33 +81,15 @@ EXPECTED_OUTPUT_PATHS = {
     "MFASS/mfass-full.parquet",
     "MFASS/published_metrics.parquet",
 }
-ORACLE_SOURCE_COLUMNS = [
-    "id",
-    "ensembl_id",
-    "chr",
-    "strand",
-    "intron1_len",
-    "exon_len",
-    "intron2_len",
-    "ref_allele",
-    "alt_allele",
-    "rel_position",
-    "snp_position_hg38_1based",
-    "label",
-    "rel_position_feature",
-    "original_seq",
-    "natural_seq",
-    "category",
-    "v2_dpsi_R1",
-    "v2_dpsi_R2",
-    "v2_index",
-    "nat_v2_index",
-    "v2_dpsi",
-]
 REGION_NAMES = {
     "upstr_intron": "upstream_intron",
     "exon": "exon",
     "downstr_intron": "downstream_intron",
+}
+ALIGNMENT_NAMES = {
+    "exact": "exact",
+    "one_substitution": "substitution",
+    "one_hg38_insertion": "insertion",
 }
 COMPLEMENT = str.maketrans("ACGT", "TGCA")
 
@@ -486,9 +481,7 @@ def optional_float(value: object) -> float | None:
     return None if pd.isna(value) else float(value)
 
 
-def build_compact_oracle(
-    data_root: Path, golden: dict
-) -> pd.DataFrame:
+def load_oracle_source(data_root: Path, golden: dict) -> pd.DataFrame:
     source_path = (
         data_root
         / golden["sources"]["mfass_measurements"]["local_path"]
@@ -496,16 +489,227 @@ def build_compact_oracle(
     source = pd.read_csv(
         source_path,
         sep="\t",
-        usecols=ORACLE_SOURCE_COLUMNS,
         low_memory=False,
     )
     source["source_index"] = source.index.astype("int64")
-    source = source.loc[source.category.eq("mutant")].reset_index(drop=True)
+    source = source.loc[source.category.eq("mutant")].copy()
+    source.reset_index(drop=True, inplace=True)
     require(
         len(source) == EXPECTED_ROWS and not source.id.duplicated().any(),
         "unexpected canonical mutant row set",
     )
+    return source
 
+
+def classify_region_alignment(
+    assay_sequence: str, hg38_sequence: str
+) -> dict:
+    if assay_sequence == hg38_sequence:
+        return {
+            "status": "exact",
+            "substitutions": 0,
+            "insertions": 0,
+            "deletions": 0,
+            "edit_distance": 0,
+            "insertion_offsets": (),
+        }
+    if len(assay_sequence) == len(hg38_sequence):
+        mismatches = sum(
+            left != right
+            for left, right in zip(assay_sequence, hg38_sequence)
+        )
+        if mismatches == 1:
+            return {
+                "status": "one_substitution",
+                "substitutions": 1,
+                "insertions": 0,
+                "deletions": 0,
+                "edit_distance": 1,
+                "insertion_offsets": (),
+            }
+    if len(hg38_sequence) == len(assay_sequence) + 1:
+        insertion_offsets = tuple(
+            offset
+            for offset in range(len(hg38_sequence))
+            if (
+                hg38_sequence[:offset]
+                + hg38_sequence[offset + 1:]
+                == assay_sequence
+            )
+        )
+        if insertion_offsets:
+            return {
+                "status": "one_hg38_insertion",
+                "substitutions": 0,
+                "insertions": 1,
+                "deletions": 0,
+                "edit_distance": 1,
+                "insertion_offsets": insertion_offsets,
+            }
+    raise RuntimeError("unexpected independent lifted-region alignment")
+
+
+def build_region_oracle(
+    source: pd.DataFrame,
+    genome: Fasta,
+    identity_orientation: dict[str, bool],
+) -> dict[str, dict]:
+    validations = {}
+    for exon, rows in source.groupby("ensembl_id", sort=False):
+        require(
+            rows[
+                [
+                    "start_hg38_0based",
+                    "end_hg38_0based",
+                    "strand",
+                    "natural_seq",
+                ]
+            ].nunique(dropna=False).eq(1).all(),
+            f"{exon}: inconsistent region source fields",
+        )
+        row = rows.iloc[0]
+        region_start = int(row.start_hg38_0based)
+        region_end = int(row.end_hg38_0based)
+        hg38_strand = str(row.strand)
+        if not identity_orientation[exon]:
+            hg38_strand = "-" if hg38_strand == "+" else "+"
+        forward_sequence = str(
+            genome[row.chr][region_start:region_end]
+        ).upper()
+        hg38_sequence = (
+            forward_sequence
+            if hg38_strand == "+"
+            else forward_sequence.translate(COMPLEMENT)[::-1]
+        )
+        validation = classify_region_alignment(
+            str(row.natural_seq).upper(), hg38_sequence
+        )
+        for variant in rows.itertuples(index=False):
+            assay_offset = int(variant.rel_position) - 1
+            hg38_offset = (
+                int(variant.snp_position_hg38_1based) - 1 - region_start
+                if hg38_strand == "+"
+                else region_end - int(variant.snp_position_hg38_1based)
+            )
+            if validation["status"] == "one_hg38_insertion":
+                mapped_offsets = {
+                    assay_offset + (assay_offset >= insertion_offset)
+                    for insertion_offset in validation["insertion_offsets"]
+                }
+            else:
+                mapped_offsets = {assay_offset}
+            require(
+                hg38_offset in mapped_offsets,
+                f"{variant.id}: independent assay/hg38 offsets disagree",
+            )
+        validations[exon] = {
+            **validation,
+            "hg38_strand": hg38_strand,
+        }
+    return validations
+
+
+def nullable_source_label(series: pd.Series) -> pd.Series:
+    return series.map({
+        True: True,
+        False: False,
+        "TRUE": True,
+        "FALSE": False,
+        "True": True,
+        "False": False,
+        1: True,
+        0: False,
+    }).astype("boolean")
+
+
+def load_published_oracle(
+    data_root: Path,
+    golden: dict,
+    source: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.Series]]:
+    pair_ids = source["id"].astype(str)
+    label_path = (
+        data_root / golden["sources"]["mfass_labels"]["local_path"]
+    )
+    labels = pd.read_csv(label_path)
+    require(
+        labels.columns.tolist() == ["id", "sdv", "dpsi", "spanr"],
+        "unexpected published-label columns",
+    )
+    labels["id"] = labels["id"].astype(str)
+    labels = labels.set_index("id")
+    require(
+        not labels.index.duplicated().any()
+        and set(labels.index) == set(pair_ids),
+        "published labels do not contain canonical pair membership",
+    )
+    labels = labels.reindex(pair_ids).reset_index(drop=True)
+
+    source_labels = nullable_source_label(source["strong_lof"])
+    published_labels = labels["sdv"].map({
+        0.0: False,
+        1.0: True,
+    }).astype("boolean")
+    try:
+        pd.testing.assert_series_equal(
+            source_labels.reset_index(drop=True),
+            published_labels.reset_index(drop=True),
+            check_names=False,
+            check_dtype=True,
+            check_exact=True,
+        )
+    except AssertionError as error:
+        raise RuntimeError(
+            f"published labels do not reproduce source strong_lof: {error}"
+        ) from error
+    require(
+        np.array_equal(
+            source["v2_dpsi"].to_numpy(float),
+            labels["dpsi"].to_numpy(float),
+            equal_nan=True,
+        ),
+        "published dPSI does not reproduce the source measurements",
+    )
+
+    source_oracle = source.drop(columns=["source_index"]).rename(columns={
+        "sequence": "source_sequence",
+        "label": "source_region",
+        "strand": "source_strand",
+    })
+    source_oracle["published_label"] = labels["sdv"].to_numpy()
+    source_oracle["published_dpsi"] = labels["dpsi"].to_numpy()
+    source_oracle["spanr_score"] = labels["spanr"].to_numpy()
+    scores = {"spanr": labels["spanr"]}
+    for method, (_filename, score_column) in SCORE_FILES.items():
+        source_name = SCORE_SOURCE_NAMES[method]
+        score_path = (
+            data_root / golden["sources"][source_name]["local_path"]
+        )
+        score_table = pd.read_csv(score_path)
+        require(
+            score_table.columns.tolist() == ["id", "score"],
+            f"unexpected {method} score columns",
+        )
+        score_table["id"] = score_table["id"].astype(str)
+        score_table = score_table.set_index("id")
+        require(
+            not score_table.index.duplicated().any()
+            and set(score_table.index) == set(pair_ids),
+            f"{method} scores do not contain canonical pair membership",
+        )
+        score_series = score_table.reindex(pair_ids)["score"].reset_index(
+            drop=True
+        )
+        source_oracle[score_column] = score_series.to_numpy()
+        scores[method] = score_series
+    source_oracle["source_label"] = source_labels.reset_index(drop=True)
+    return source_oracle, labels, scores
+
+
+def build_output_oracles(
+    data_root: Path, golden: dict
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    source = load_oracle_source(data_root, golden)
     fasta_path = (
         data_root
         / golden["sources"]["grch38_no_alt_reference"]["local_path"]
@@ -527,34 +731,41 @@ def build_compact_oracle(
             ],
             index=source.index,
         )
+        source_refs = source.ref_allele.str.upper()
+        orientation_votes = pd.DataFrame({
+            "component_id": source.ensembl_id,
+            "direct": reference_bases.eq(source_refs).astype(int),
+            "reverse": reference_bases.eq(
+                source_refs.str.translate(COMPLEMENT)
+            ).astype(int),
+        }).groupby("component_id", sort=False)[["direct", "reverse"]].sum()
+        require(
+            not orientation_votes.direct.eq(
+                orientation_votes.reverse
+            ).any(),
+            "ambiguous independent exon-orientation vote",
+        )
+        identity_orientation = orientation_votes.direct.gt(
+            orientation_votes.reverse
+        ).to_dict()
+        region_validations = build_region_oracle(
+            source, genome, identity_orientation
+        )
     finally:
         genome.close()
 
-    source_refs = source.ref_allele.str.upper()
-    orientation_votes = pd.DataFrame({
-        "component_id": source.ensembl_id,
-        "direct": reference_bases.eq(source_refs).astype(int),
-        "reverse": reference_bases.eq(
-            source_refs.str.translate(COMPLEMENT)
-        ).astype(int),
-    }).groupby("component_id", sort=False)[["direct", "reverse"]].sum()
-    require(
-        not orientation_votes.direct.eq(
-            orientation_votes.reverse
-        ).any(),
-        "ambiguous independent exon-orientation vote",
+    source_oracle, _labels, _scores = load_published_oracle(
+        data_root, golden, source
     )
-    identity_orientation = orientation_votes.direct.gt(
-        orientation_votes.reverse
-    ).to_dict()
-
-    rows = []
+    compact_rows = []
+    audit_rows = []
     for row, reference_base in zip(
         source.itertuples(index=False), reference_bases
     ):
         source_ref = str(row.ref_allele).upper()
         source_alt = str(row.alt_allele).upper()
         identity = identity_orientation[row.ensembl_id]
+        region_validation = region_validations[row.ensembl_id]
         genomic_ref = (
             source_ref
             if identity
@@ -566,9 +777,11 @@ def build_compact_oracle(
             else source_alt.translate(COMPLEMENT)
         )
         effect_sign = 1.0
+        action = "identity" if identity else "reverse_complement"
         if reference_base == genomic_alt:
             genomic_ref, genomic_alt = genomic_alt, genomic_ref
             effect_sign = -1.0
+            action += "_reference_swap"
         else:
             require(
                 reference_base == genomic_ref,
@@ -643,7 +856,8 @@ def build_compact_oracle(
             if row.strand == "+"
             else row.intron2_len
         )
-        rows.append({
+        compact_rows.append({
+            "split": "test",
             "source_index": int(row.source_index),
             "pair_id": str(row.id),
             "component_id": str(row.ensembl_id),
@@ -677,10 +891,28 @@ def build_compact_oracle(
             "exon_end": exon_start + int(row.exon_len),
             "region": REGION_NAMES[str(row.label)],
             "splice_site_offset": int(row.rel_position_feature),
+            "assay_hg38_alignment": ALIGNMENT_NAMES[
+                region_validation["status"]
+            ],
+        })
+        audit_rows.append({
+            "orientation_action": action,
+            "region_edit_distance": int(
+                region_validation["edit_distance"]
+            ),
+            "region_substitutions": int(
+                region_validation["substitutions"]
+            ),
+            "region_insertions": int(region_validation["insertions"]),
+            "region_deletions": int(region_validation["deletions"]),
+            "distance_to_splice_site": abs(
+                int(row.rel_position_feature)
+            ),
+            "is_evaluable": delta_psi is not None,
         })
 
-    oracle = pd.DataFrame(rows)
-    oracle["label"] = oracle["label"].astype("boolean")
+    compact_oracle = pd.DataFrame(compact_rows)
+    compact_oracle["label"] = compact_oracle["label"].astype("boolean")
     for column in (
         "delta_psi",
         "delta_psi_rep1",
@@ -688,8 +920,55 @@ def build_compact_oracle(
         "ref_inclusion",
         "alt_inclusion",
     ):
-        oracle[column] = oracle[column].astype("float32")
-    return oracle
+        compact_oracle[column] = compact_oracle[column].astype("float32")
+    audit_oracle = pd.DataFrame(audit_rows)
+    audit_oracle["is_evaluable"] = audit_oracle[
+        "is_evaluable"
+    ].astype("boolean")
+    full_oracle = pd.concat(
+        [compact_oracle, source_oracle, audit_oracle],
+        axis=1,
+    )
+    require(
+        not full_oracle.columns.duplicated().any(),
+        "independent full oracle has duplicate columns",
+    )
+    return compact_oracle, full_oracle, source
+
+
+def verify_metrics_provenance(
+    metrics: pd.DataFrame, golden: dict
+) -> None:
+    identities = [
+        golden["sources"][name]["identity"]
+        for name in PUBLISHED_SOURCE_NAMES
+    ]
+    repositories = {identity.get("repository") for identity in identities}
+    revisions = {identity.get("revision") for identity in identities}
+    require(
+        len(repositories) == 1
+        and None not in repositories
+        and len(revisions) == 1
+        and None not in revisions,
+        "published metric inputs do not share one pinned source identity",
+    )
+    repository = str(next(iter(repositories))).rstrip("/")
+    revision = str(next(iter(revisions)))
+    require(
+        len(revision) == 40
+        and all(character in "0123456789abcdef" for character in revision),
+        "published metric source revision is not a pinned Git commit",
+    )
+    values = metrics["source"].drop_duplicates().tolist()
+    require(
+        values == [f"SpliceConsensus {revision}"],
+        "published metric source text or revision changed",
+    )
+    require(
+        "SpliceConsensus".casefold()
+        == repository.rsplit("/", 1)[-1].casefold(),
+        "published metric source text differs from its pinned repository",
+    )
 
 
 def independent_membership_checks(
@@ -698,9 +977,14 @@ def independent_membership_checks(
     metrics: pd.DataFrame,
     full: pd.DataFrame | None,
     contract: dict,
+    golden: dict,
 ) -> None:
+    source_path = (
+        data_root
+        / golden["sources"]["mfass_measurements"]["local_path"]
+    )
     source = pd.read_csv(
-        data_root / "source/snv_data_clean.txt",
+        source_path,
         sep="\t",
         usecols=["id", "category"],
     )
@@ -735,9 +1019,10 @@ def independent_membership_checks(
         "MFASS reference sequences are expected to repeat across variant pairs",
     )
 
-    labels = pd.read_csv(
-        data_root / "published/mfass_labels.csv"
-    ).set_index("id")
+    label_path = (
+        data_root / golden["sources"]["mfass_labels"]["local_path"]
+    )
+    labels = pd.read_csv(label_path).set_index("id")
     require(
         not labels.index.duplicated().any()
         and set(labels.index) == set(pair_ids),
@@ -789,11 +1074,13 @@ def independent_membership_checks(
             scores = labels["spanr"]
             score_column = method_contracts[method]["score_column"]
         else:
-            filename, _score_column = SCORE_FILES[method]
+            _filename, _score_column = SCORE_FILES[method]
             score_column = method_contracts[method]["score_column"]
-            score_table = pd.read_csv(
-                data_root / "published" / filename
-            ).set_index("id")
+            source_name = SCORE_SOURCE_NAMES[method]
+            score_path = (
+                data_root / golden["sources"][source_name]["local_path"]
+            )
+            score_table = pd.read_csv(score_path).set_index("id")
             require(
                 not score_table.index.duplicated().any()
                 and set(score_table.index) == set(pair_ids),
@@ -943,14 +1230,23 @@ def main() -> None:
             "full output must have 28,972 rows and 92 columns",
         )
 
-    oracle = build_compact_oracle(args.data_root, golden)
+    compact_oracle, full_oracle, _source = build_output_oracles(
+        args.data_root, golden
+    )
     compare_frames(
         "independent source-derived compact oracle",
-        compact.loc[:, oracle.columns],
-        oracle,
+        compact,
+        compact_oracle,
     )
+    if full is not None:
+        compare_frames(
+            "independent source/score/alignment/audit full oracle",
+            full,
+            full_oracle,
+        )
+    verify_metrics_provenance(metrics, golden)
     independent_membership_checks(
-        args.data_root, compact, metrics, full, contract
+        args.data_root, compact, metrics, full, contract, golden
     )
     after = validate_inputs(golden, args.data_root)
     require(before == after, "pinned input changed during verification")
@@ -961,8 +1257,9 @@ def main() -> None:
     )
     print(
         "verified golden hashes/schemas, the 23-column compact contract"
-        f"{detail}, 28,972 pair_id rows, repeated assay references, "
-        "and five independently masked published baselines"
+        f"{detail}, independent alignment/source/score/audit values, "
+        "28,972 pair_id rows, repeated assay references, and five "
+        "independently masked published baselines with pinned provenance"
     )
 
 
